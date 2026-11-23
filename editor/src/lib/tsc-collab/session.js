@@ -29,6 +29,11 @@ const MAX_MESSAGE_CHARS = 190 * 1024 * 1024;
 const MIN_AUTO_RESYNC_INTERVAL_MS = 60000;
 // Free hosting plans put idle servers to sleep; waking one can take ~1 minute.
 const WAKE_UP_TIMEOUT_MS = 90000;
+// A new connection sometimes fails on the way even though the server is fine
+// (some tunnels, like playit.gg's HTTPS tunnels, drop a share of new browser
+// connections). Before saying the server can't be reached, the first
+// connection is tried again after each of these delays.
+const FIRST_CONNECT_RETRY_DELAYS_MS = [1000, 2000, 3000];
 
 /**
  * Asks the server's normal web address for /health first. A sleeping free
@@ -61,6 +66,7 @@ class CollabSession {
         this.wantConnected = false;
         this.everWelcomed = false;
         this.reconnectAttempts = 0;
+        this.firstConnectFailures = 0;
         this.reconnectTimer = null;
         this.pingTimer = null;
         this.lastMessageAt = 0;
@@ -126,6 +132,7 @@ class CollabSession {
         this.wantConnected = true;
         this.everWelcomed = false;
         this.reconnectAttempts = 0;
+        this.firstConnectFailures = 0;
         setState({
             status: 'connecting',
             error: null,
@@ -228,6 +235,15 @@ class CollabSession {
         if (!this.wantConnected) return;
         const {serverUrl} = this.joinParams;
         if (!this.everWelcomed) {
+            if (this.firstConnectFailures < FIRST_CONNECT_RETRY_DELAYS_MS.length) {
+                // Still "Connecting to the server…" as far as the person can tell.
+                const delay = FIRST_CONNECT_RETRY_DELAYS_MS[this.firstConnectFailures++];
+                log.warn(`[collab] could not connect to ${serverUrl}, trying again in ${delay} ms`);
+                this.reconnectTimer = setTimeout(() => {
+                    if (this.wantConnected && !this.ws) this.openSocket();
+                }, delay);
+                return;
+            }
             this.fail(
                 `Couldn't connect to the collaboration server at ${serverUrl}. ` +
                 'Is it running? (Start it with "npm start" in the collab-server folder.)'
@@ -527,4 +543,5 @@ const getCollabSession = () => {
     return session;
 };
 
-export {getCollabSession};
+// The class itself is exported for the unit tests.
+export {getCollabSession, CollabSession};
