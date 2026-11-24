@@ -45,6 +45,18 @@ const serializeFields = fields => {
     return out;
 };
 
+/**
+ * Block positions must be numbers in an .sb3 file, or nobody can load it.
+ * They can arrive as text: Blockly's "create" events carry them that way, and
+ * a block whose position then never changes keeps it.
+ * @param {*} value a block's x or y
+ * @returns {number} the same position as a number
+ */
+const coordinate = value => {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : 0;
+};
+
 const serializeBlockFull = block => {
     const out = {
         opcode: block.opcode,
@@ -56,8 +68,8 @@ const serializeBlockFull = block => {
         topLevel: !!block.topLevel
     };
     if (block.topLevel) {
-        out.x = block.x || 0;
-        out.y = block.y || 0;
+        out.x = coordinate(block.x);
+        out.y = coordinate(block.y);
     }
     if (block.mutation) out.mutation = block.mutation;
     if (block.comment) out.comment = block.comment;

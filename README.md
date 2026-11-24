@@ -47,12 +47,22 @@ the window to stop.
 
 ## Work together
 
-1. Click **Collaborate** in the menu bar.
-2. Type your name and a room code (or click **New code**), then **Join room**.
-   - **New room:** your current project becomes the shared project.
+1. Click **Collaborate** in the menu bar and type your name.
+2. **Open rooms** lists the rooms people are in right now. Click **Join** next to
+   one to join it. You don't need a link.
+3. Or start your own room: keep the room code (or click **New code**), then
+   **Join room**.
+   - **New room:** your current project becomes the shared project. With
+     "Show a new room in Open rooms" ticked (the default), everyone on the
+     server sees it in their list and can join. Untick it to keep the room
+     private.
    - **Existing room:** your editor switches to the room's project, so save
      your own work first.
-3. Click **Copy invite link** and send it to your friends.
+4. For a room that isn't in Open rooms, click **Copy invite link** and send it
+   to your friends. (When you open an invite link, the box starts unticked.)
+   Anyone in a room can show it in Open rooms or hide it again with the
+   checkbox under the room code. Hiding only takes it off the list: people who
+   already know the room code can still join.
 
 Friends on the same Wi-Fi must open the editor using your computer's network
 address (the launcher prints it, for example `http://192.168.1.20:8601/editor.html`),
@@ -95,7 +105,32 @@ Accounts live on the TurboScratch server. On your computer they're stored in
 - Loading a different project (File → Load / New) replaces the project for everyone
 - Presence (who is editing which sprite) and a room chat
 
-Rooms are saved in `collab-server/data/` so they survive a server restart.
+Rooms are saved in `collab-server/data/` so they survive a server restart, and
+even a crash: new edits reach the disk within a fraction of a second. Each room
+has a project file (`<room>.<number>.sb3`), a list of the edits since then
+(`<room>.ops`) and its settings (`<room>.json`). A damaged file is never
+overwritten: it's renamed to `...damaged-<time>` and the server uses whatever
+can still be read.
+
+### Collaboration server settings
+
+Set these as environment variables (or in `collab-server/.env`). The defaults
+are fine for most servers.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `ALLOWED_ORIGINS` | (any) | Websites allowed to connect, e.g. `https://turboscratch-ide.github.io` |
+| `ROOM_EXPIRE_DAYS` | 90 | Rooms nobody opened for this many days are deleted (0 = keep forever) |
+| `MAX_ROOM_STORAGE_MB` | 2048 | No new rooms are created while room files use more than this; existing rooms keep working (0 = no limit) |
+| `MAX_PENDING_SEND_MB` | 256 | When this much data is waiting to be sent, people joining big rooms are asked to try again in a moment (0 = no limit) |
+| `CREATOR_GRACE_MS` | 15000 | If a room's creator loses their connection before their project arrives, how long they get to come back |
+| `FIRST_SNAPSHOT_TIMEOUT_MS` | 180000 | How long people wait for a new room's project before they're told it isn't coming (they keep waiting while it's still uploading) |
+| `MAX_OP_LOG_OPS`, `MAX_OP_LOG_MB` | 10000, 100 | How many edits a room can collect before its project must be saved again (normally that happens long before) |
+
+The server is built to be safe on the internet: one person can't crash it with
+a strange message, make it run out of memory or disk, or break other rooms.
+If your Wi-Fi drops for a moment, the editor reconnects by itself and you keep
+your place and colour in the room.
 
 ### Known limitations
 

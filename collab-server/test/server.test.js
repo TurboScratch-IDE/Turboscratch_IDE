@@ -7,7 +7,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const PORT = 18090 + Math.floor(Math.random() * 1000);
+// The first start picks a free port; restarts reuse it.
+let PORT = 0;
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'tsc-collab-'));
 let serverProcess;
 
@@ -17,7 +18,11 @@ const startServer = () => new Promise((resolve, reject) => {
         stdio: ['ignore', 'pipe', 'inherit']
     });
     serverProcess.stdout.on('data', chunk => {
-        if (chunk.toString().includes('listening')) resolve();
+        const listening = /listening on ws:\/\/[^:]+:(\d+)/.exec(chunk.toString());
+        if (listening) {
+            PORT = Number(listening[1]);
+            resolve();
+        }
     });
     serverProcess.on('error', reject);
 });
@@ -72,6 +77,12 @@ class TestClient {
     }
 }
 
+/** Uploaded projects must look like .sb3 files (zip files start with "PK"). */
+const ZIP_START = 'PK\u0003\u0004';
+const fakeSb3 = text => Buffer.from(ZIP_START + text).toString('base64');
+const projectText = base64 => Buffer.from(base64, 'base64').toString()
+    .slice(ZIP_START.length);
+
 before(startServer);
 after(async () => {
     await stopServer();
@@ -86,7 +97,7 @@ test('first person provides the project, second person receives it and edits flo
     const need = await alice.next('need-snapshot');
     assert.strictEqual(need.seq, 0);
 
-    const project = Buffer.from('pretend this is an sb3 file');
+    const project = Buffer.from('PK\u0003\u0004pretend this is an sb3 file');
     alice.send({t: 'snapshot', seq: 0, data: project.toString('base64')});
 
     alice.send({t: 'op', ref: 1, op: {kind: 'blocks', event: {type: 'create', blockId: 'a'}}});
@@ -124,7 +135,7 @@ test('first person provides the project, second person receives it and edits flo
 
     // After a quiet moment the oldest person is asked for a fresh snapshot.
     await alice.next('request-snapshot');
-    alice.send({t: 'snapshot', seq: 2, data: Buffer.from('newer project').toString('base64')});
+    alice.send({t: 'snapshot', seq: 2, data: fakeSb3('newer project')});
 
     bob.close();
     await alice.next('peer-leave');
@@ -134,7 +145,7 @@ test('first person provides the project, second person receives it and edits flo
     // The room was saved to disk and is restored for the next visitor.
     const carol = new TestClient('demo-room', 'Carol');
     const snapshotC = await carol.next('snapshot');
-    assert.strictEqual(Buffer.from(snapshotC.data, 'base64').toString(), 'newer project');
+    assert.strictEqual(projectText(snapshotC.data), 'newer project');
     assert.strictEqual(snapshotC.seq, 2);
     const caughtUp = await carol.next('caught-up');
     assert.strictEqual(caughtUp.seq, 2);
@@ -146,9 +157,9 @@ test('people who join while the first project is uploading get it once it arrive
     await dana.next('need-snapshot');
     const erin = new TestClient('upload-race', 'Erin');
     await erin.next('welcome');
-    dana.send({t: 'snapshot', seq: 0, data: Buffer.from('dana project').toString('base64')});
+    dana.send({t: 'snapshot', seq: 0, data: fakeSb3('dana project')});
     const snapshot = await erin.next('snapshot');
-    assert.strictEqual(Buffer.from(snapshot.data, 'base64').toString(), 'dana project');
+    assert.strictEqual(projectText(snapshot.data), 'dana project');
     dana.close();
     erin.close();
 });
@@ -172,13 +183,13 @@ test('bad room codes and old editors are turned away', async () => {
 test('after a snapshot, everyone else is told its fingerprint so they can self-check', async () => {
     const hana = new TestClient('checkpoint-room', 'Hana');
     await hana.next('need-snapshot');
-    hana.send({t: 'snapshot', seq: 0, hash: 'first', data: Buffer.from('v1').toString('base64')});
+    hana.send({t: 'snapshot', seq: 0, hash: 'first', data: fakeSb3('v1')});
     const ivan = new TestClient('checkpoint-room', 'Ivan');
     await ivan.next('caught-up');
     ivan.send({t: 'op', ref: 1, op: {kind: 'blocks'}});
     await ivan.next('ack');
     await hana.next('request-snapshot');
-    hana.send({t: 'snapshot', seq: 1, hash: 'abc123', data: Buffer.from('v2').toString('base64')});
+    hana.send({t: 'snapshot', seq: 1, hash: 'abc123', data: fakeSb3('v2')});
     const checkpoint = await ivan.next('checkpoint');
     assert.strictEqual(checkpoint.seq, 1);
     assert.strictEqual(checkpoint.hash, 'abc123');
@@ -188,4 +199,118 @@ test('after a snapshot, everyone else is told its fingerprint so they can self-c
     assert.deepStrictEqual(presence.presence, {target: 'Cat'});
     hana.close();
     ivan.close();
+});
+
+const helloClient = (room, name, extra) => {
+    const client = Object.create(TestClient.prototype);
+    client.messages = [];
+    client.waiters = [];
+    client.ws = new WebSocket(`ws://127.0.0.1:${PORT}`);
+    client.ws.addEventListener('message', e => {
+        const message = JSON.parse(e.data);
+        client.messages.push(message);
+        client.waiters = client.waiters.filter(w => {
+            if (w.match(message)) {
+                w.resolve(message);
+                return false;
+            }
+            return true;
+        });
+    });
+    client.ws.addEventListener('open', () => client.send({t: 'hello', protocol: 1, room, name, ...extra}));
+    return client;
+};
+
+const roomList = async () => {
+    const response = await fetch(`http://127.0.0.1:${PORT}/rooms`);
+    assert.strictEqual(response.status, 200);
+    assert.strictEqual(response.headers.get('access-control-allow-origin'), '*');
+    return (await response.json()).rooms;
+};
+
+const waitFor = async (check, what) => {
+    for (let i = 0; i < 40; i++) {
+        if (await check()) return;
+        await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    throw new Error(`timed out waiting for ${what}`);
+};
+
+test('room list: listed rooms show up with their title and people, private ones never do', async () => {
+    const jo = helloClient('listed-room', 'Jo', {listed: true, title: '  My\u0007 Game  '});
+    const welcome = await jo.next('welcome');
+    assert.strictEqual(welcome.listed, true);
+    assert.strictEqual(welcome.title, 'My Game');
+    await jo.next('need-snapshot');
+    // Not shown until the project is uploaded (nobody could join it yet).
+    assert.ok(!(await roomList()).some(r => r.room === 'listed-room'));
+    jo.send({t: 'snapshot', seq: 0, data: fakeSb3('jo project')});
+    await waitFor(async () => (await roomList()).some(r => r.room === 'listed-room'), 'the listed room');
+
+    const kim = helloClient('secret-room', 'Kim', {listed: false, title: 'Secret'});
+    await kim.next('need-snapshot');
+    kim.send({t: 'snapshot', seq: 0, data: fakeSb3('kim project')});
+    const lee = helloClient('no-choice-room', 'Lee', {});
+    await lee.next('need-snapshot');
+    lee.send({t: 'snapshot', seq: 0, data: fakeSb3('lee project')});
+
+    // Someone joins the listed room. Their own "listed: false" doesn't change it.
+    const max = helloClient('listed-room', 'Max', {listed: false, title: 'Other title'});
+    const maxWelcome = await max.next('welcome');
+    assert.strictEqual(maxWelcome.listed, true);
+    await max.next('caught-up');
+
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const rooms = await roomList();
+    assert.deepStrictEqual(rooms.find(r => r.room === 'listed-room'),
+        {room: 'listed-room', title: 'My Game', people: 2, names: ['Jo', 'Max']});
+    assert.ok(!rooms.some(r => r.room === 'secret-room'), 'a private room is never listed');
+    assert.ok(!rooms.some(r => r.room === 'no-choice-room'), 'rooms are private unless chosen');
+
+    // Other methods are refused.
+    const post = await fetch(`http://127.0.0.1:${PORT}/rooms`, {method: 'POST'});
+    assert.strictEqual(post.status, 405);
+
+    jo.close();
+    max.close();
+    kim.close();
+    lee.close();
+    await waitFor(async () => !(await roomList()).some(r => r.room === 'listed-room'), 'the empty room to leave the list');
+});
+
+test('room list: anyone in a room can list it or make it private, and it is remembered', async () => {
+    const nia = helloClient('toggle-room', 'Nia', {listed: false, title: 'Toggle'});
+    await nia.next('need-snapshot');
+    nia.send({t: 'snapshot', seq: 0, data: fakeSb3('nia project')});
+    const oz = helloClient('toggle-room', 'Oz', {});
+    const ozWelcome = await oz.next('welcome');
+    await oz.next('caught-up');
+    assert.ok(!(await roomList()).some(r => r.room === 'toggle-room'));
+
+    // Bad values are ignored.
+    oz.send({t: 'room-settings', listed: 'yes'});
+    oz.send({t: 'room-settings', listed: true});
+    const infoNia = await nia.next('room-info');
+    const infoOz = await oz.next('room-info');
+    assert.strictEqual(infoNia.listed, true);
+    assert.strictEqual(infoNia.by, ozWelcome.id);
+    assert.strictEqual(infoOz.listed, true);
+    assert.ok((await roomList()).some(r => r.room === 'toggle-room'));
+
+    // Everyone leaves; the choice is saved with the room.
+    nia.close();
+    oz.close();
+    await waitFor(async () => !(await roomList()).some(r => r.room === 'toggle-room'), 'the empty room to leave the list');
+    const pia = helloClient('toggle-room', 'Pia', {listed: false});
+    const piaWelcome = await pia.next('welcome');
+    assert.strictEqual(piaWelcome.listed, true);
+    assert.strictEqual(piaWelcome.title, 'Toggle');
+    await pia.next('caught-up');
+    await waitFor(async () => (await roomList()).some(r => r.room === 'toggle-room'), 'the room to be listed again');
+
+    pia.send({t: 'room-settings', listed: false});
+    const off = await pia.next('room-info');
+    assert.strictEqual(off.listed, false);
+    assert.ok(!(await roomList()).some(r => r.room === 'toggle-room'));
+    pia.close();
 });

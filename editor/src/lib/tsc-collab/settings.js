@@ -50,6 +50,11 @@ const defaultServerUrl = () => {
     return `ws://${host}:8090`;
 };
 
+/** A collaboration server's normal web address (ws://host:8090 → http://host:8090). */
+const serverHttpUrl = serverUrl => serverUrl.trim()
+    .replace(/^ws(s?):\/\//i, 'http$1://')
+    .replace(/\/+$/, '');
+
 const WORDS_A = ['turbo', 'pixel', 'cosmic', 'rapid', 'sunny', 'neon', 'happy', 'mega', 'super', 'swift'];
 const WORDS_B = ['cats', 'rockets', 'blocks', 'gobos', 'dragons', 'comets', 'robots', 'waves', 'stars', 'tacos'];
 
@@ -96,6 +101,7 @@ export {
     saveServer,
     isLocalHostname,
     defaultServerUrl,
+    serverHttpUrl,
     makeRoomCode,
     makeInviteLink,
     readInviteFromUrl

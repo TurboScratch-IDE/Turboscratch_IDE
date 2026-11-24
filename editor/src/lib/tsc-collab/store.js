@@ -10,6 +10,10 @@ const initialState = {
     error: null,
     room: null,
     serverUrl: null,
+    /** Whether the room shows up in the room list ("Open rooms"). */
+    listed: false,
+    /** False on older servers that have no room list. */
+    listSupported: false,
     /** @type {null|{id: string, name: string, color: string}} */
     me: null,
     /** @type {Array<{id: string, name: string, color: string, presence: {target?: string}}>} */

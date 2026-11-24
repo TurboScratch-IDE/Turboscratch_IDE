@@ -11,6 +11,7 @@ import {
     makeInviteLink,
     isLocalHostname
 } from '../../lib/tsc-collab/settings';
+import {isServerUrl, useRoomList} from '../../lib/tsc-collab/room-list';
 import {getAccountState} from '../../lib/tsc-community/store';
 import styles from './collab-modal.css';
 
@@ -31,25 +32,119 @@ Avatar.propTypes = {
     small: PropTypes.bool
 };
 
-const JoinForm = ({initialRoom, lastRoom, initialServer, error, projectReady, onJoin}) => {
+/**
+ * "Open rooms": rooms anyone on the server can join with one click.
+ * @param {object} props the server address, whether joining is possible yet, and what to do on Join
+ * @returns {React.ReactElement} the list
+ */
+const RoomList = ({serverUrl, canJoin, needsName, onPick}) => {
+    const {rooms, error} = useRoomList(serverUrl);
+    let content;
+    if (rooms && rooms.length > 0) {
+        content = (
+            <ul className={styles.roomList}>
+                {rooms.map(listed => (
+                    <li
+                        key={listed.room}
+                        className={styles.roomItem}
+                    >
+                        <div className={styles.roomInfo}>
+                            <div className={styles.roomTitle}>{listed.title || listed.room}</div>
+                            <div className={styles.roomMeta}>
+                                {`${listed.room} · ${listed.people} ${listed.people === 1 ? 'person' : 'people'}: `}
+                                {listed.names.join(', ')}
+                                {listed.people > listed.names.length ? '…' : ''}
+                            </div>
+                        </div>
+                        <button
+                            type="button"
+                            className={styles.primaryButton}
+                            disabled={!canJoin}
+                            onClick={() => onPick(listed.room)}
+                        >
+                            {'Join'}
+                        </button>
+                    </li>
+                ))}
+            </ul>
+        );
+    } else if (rooms) {
+        content = (
+            <div className={styles.roomListEmpty}>
+                {'No open rooms right now. Create one below, and others will see it here.'}
+            </div>
+        );
+    } else if (!error) {
+        content = <div className={styles.roomListEmpty}>{'Looking for rooms…'}</div>;
+    }
+    return (
+        <div className={styles.field}>
+            <span className={styles.label}>{'Open rooms'}</span>
+            {content}
+            {error && <span className={styles.hint}>{error}</span>}
+            {needsName && rooms && rooms.length > 0 && (
+                <span className={styles.hint}>{'Type your name above to join a room.'}</span>
+            )}
+        </div>
+    );
+};
+RoomList.propTypes = {
+    canJoin: PropTypes.bool,
+    needsName: PropTypes.bool,
+    onPick: PropTypes.func.isRequired,
+    serverUrl: PropTypes.string.isRequired
+};
+
+// The person's last choice for "Show a new room in Open rooms". It's kept
+// here (not in the form) so it survives a failed or cancelled join, which
+// shows a fresh form.
+let listedChoice = null;
+
+const JoinForm = ({initialRoom, lastRoom, initialServer, error, projectReady, projectChanged, onJoin}) => {
     const account = getAccountState().user;
     const [name, setName] = useState(loadSavedName() || (account ? account.nickname : ''));
     const [room, setRoom] = useState(initialRoom || lastRoom || makeRoomCode());
     const [server, setServer] = useState(initialServer || loadSavedServer() || defaultServerUrl());
     const [showAdvanced, setShowAdvanced] = useState(!!initialServer || !server);
+    // New rooms are shown in "Open rooms" unless the person unticks this.
+    // Someone who came with an invite link means to join a private room, so
+    // for them it starts unticked.
+    const [listed, setListedState] = useState(listedChoice === null ? !initialRoom : listedChoice);
+    const setListed = value => {
+        listedChoice = value;
+        setListedState(value);
+    };
 
     const roomValid = /^[a-z0-9][a-z0-9_-]{0,39}$/i.test(room.trim());
-    const canJoin = projectReady && roomValid && name.trim().length > 0 && /^wss?:\/\//.test(server.trim());
+    const serverValid = isServerUrl(server);
+    const canJoinAny = projectReady && name.trim().length > 0 && serverValid;
+    const canJoin = canJoinAny && roomValid;
+    // A server named by an invite link isn't contacted before the person
+    // decides to join (they might not trust it).
+    const foreignInviteServer = !!initialServer && initialServer !== defaultServerUrl() &&
+        server.trim() === initialServer;
+
+    const join = (roomCode, fromList) => onJoin({
+        name: name.trim(),
+        room: roomCode.trim().toLowerCase(),
+        serverUrl: server.trim(),
+        // A room picked from the list already exists. If it has just closed,
+        // joining creates it again: keep that one private.
+        listed: fromList ? false : listed
+    });
 
     const handleSubmit = e => {
         e.preventDefault();
-        if (canJoin) {
-            onJoin({
-                name: name.trim(),
-                room: room.trim().toLowerCase(),
-                serverUrl: server.trim()
-            });
-        }
+        if (canJoin) join(room, false);
+    };
+
+    const handlePick = roomCode => {
+        // eslint-disable-next-line no-alert
+        if (projectChanged && !confirm(
+            'Joining a room replaces the project you have open with the room\'s project. ' +
+            'Changes you haven\'t saved will be lost. Join anyway?'
+        )) return;
+        join(roomCode, true);
     };
 
     return (
@@ -73,8 +168,16 @@ const JoinForm = ({initialRoom, lastRoom, initialServer, error, projectReady, on
                     onChange={e => setName(e.target.value)}
                 />
             </label>
+            {serverValid && !foreignInviteServer && (
+                <RoomList
+                    serverUrl={server.trim()}
+                    canJoin={canJoinAny}
+                    needsName={!name.trim()}
+                    onPick={handlePick}
+                />
+            )}
             <label className={styles.field}>
-                <span className={styles.label}>{'Room code'}</span>
+                <span className={styles.label}>{'Create a room, or join one by its code'}</span>
                 <div className={styles.row}>
                     <input
                         className={styles.input}
@@ -94,6 +197,17 @@ const JoinForm = ({initialRoom, lastRoom, initialServer, error, projectReady, on
                 {!roomValid && (
                     <span className={styles.hint}>{'Use letters, numbers, - and _ (max 40).'}</span>
                 )}
+            </label>
+            <label className={styles.checkRow}>
+                <input
+                    type="checkbox"
+                    checked={listed}
+                    onChange={e => setListed(e.target.checked)}
+                />
+                <span>
+                    {'Show a new room in Open rooms, so anyone on this server can join it without a link. '}
+                    {'Untick it to keep the room private.'}
+                </span>
             </label>
             {initialServer && initialServer !== defaultServerUrl() && (
                 <div className={styles.error}>
@@ -152,6 +266,7 @@ const JoinForm = ({initialRoom, lastRoom, initialServer, error, projectReady, on
 JoinForm.propTypes = {
     error: PropTypes.string,
     lastRoom: PropTypes.string,
+    projectChanged: PropTypes.bool,
     projectReady: PropTypes.bool,
     initialRoom: PropTypes.string,
     initialServer: PropTypes.string,
@@ -232,7 +347,7 @@ Chat.propTypes = {
     onSend: PropTypes.func.isRequired
 };
 
-const RoomView = ({state, onLeave, onResync, onSendChat}) => {
+const RoomView = ({state, onLeave, onResync, onSendChat, onSetListed}) => {
     const [copied, setCopied] = useState(false);
     const invite = makeInviteLink(state.room, state.serverUrl);
     const handleCopy = () => {
@@ -267,10 +382,30 @@ const RoomView = ({state, onLeave, onResync, onSendChat}) => {
                     {copied ? 'Copied!' : 'Copy invite link'}
                 </button>
             </div>
+            {state.listSupported ? (
+                <label className={styles.checkRow}>
+                    <input
+                        type="checkbox"
+                        checked={!!state.listed}
+                        disabled={state.status !== 'connected'}
+                        onChange={e => onSetListed(e.target.checked)}
+                    />
+                    <span>
+                        {state.listed ?
+                            'Shown in Open rooms: anyone on this server can join without a link.' :
+                            'Not in Open rooms: people need the invite link or the room code to join. ' +
+                            'Tick to show it in Open rooms.'}
+                    </span>
+                </label>
+            ) : (
+                <p className={styles.hint}>
+                    {'This server is an older version without Open rooms. Share the invite link instead.'}
+                </p>
+            )}
             {isLocalHostname(location.hostname) && (
                 <p className={styles.hint}>
                     {'Tip: friends on other computers can\'t open "localhost". Open this editor with your '}
-                    {'computer\'s network address (like http://192.168.1.20:8601) before copying the link.'}
+                    {'computer\'s network address (like http://192.168.1.20:8601) to invite them.'}
                 </p>
             )}
             <div className={styles.label}>{`People here (${everyone.length})`}</div>
@@ -325,6 +460,7 @@ RoomView.propTypes = {
     onLeave: PropTypes.func.isRequired,
     onResync: PropTypes.func.isRequired,
     onSendChat: PropTypes.func.isRequired,
+    onSetListed: PropTypes.func.isRequired,
     state: PropTypes.object.isRequired
 };
 
@@ -366,6 +502,7 @@ const CollabModal = props => {
                 onLeave={props.onLeave}
                 onResync={props.onResync}
                 onSendChat={props.onSendChat}
+                onSetListed={props.onSetListed}
             />
         );
     } else {
@@ -375,6 +512,7 @@ const CollabModal = props => {
                 initialRoom={props.initialRoom}
                 initialServer={props.initialServer}
                 lastRoom={state.room}
+                projectChanged={!!props.projectChanged}
                 projectReady={props.projectReady !== false}
                 onJoin={props.onJoin}
             />
@@ -404,6 +542,8 @@ CollabModal.propTypes = {
     onLeave: PropTypes.func.isRequired,
     onResync: PropTypes.func.isRequired,
     onSendChat: PropTypes.func.isRequired,
+    onSetListed: PropTypes.func.isRequired,
+    projectChanged: PropTypes.bool,
     projectReady: PropTypes.bool
 };
 

@@ -295,3 +295,68 @@
     font-weight: bold;
     margin-right: 0.4rem;
 }
+
+/* ---- room list ("Open rooms") ---- */
+
+.room-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    max-height: 13rem;
+    overflow-y: auto;
+}
+
+.room-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.45rem 0.5rem 0.45rem 0.75rem;
+    border-radius: 0.6rem;
+    background: $ui-black-transparent;
+}
+
+.room-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.room-title {
+    font-weight: bold;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.room-meta {
+    font-size: 0.75rem;
+    opacity: 0.7;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.room-list-empty {
+    padding: 0.6rem 0.75rem;
+    border-radius: 0.6rem;
+    background: $ui-black-transparent;
+    font-size: 0.8rem;
+    opacity: 0.75;
+}
+
+.check-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    line-height: 1.4;
+    cursor: pointer;
+}
+
+.check-row input {
+    margin: 0.15rem 0 0;
+    flex-shrink: 0;
+    accent-color: $looks-secondary;
+}
