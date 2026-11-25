@@ -38,7 +38,7 @@ import {
 } from '../../reducers/modals';
 import AccountButtons from '../tsc-community/account-button.jsx';
 import CollabButton from '../tsc-collab/collab-button.jsx';
-import AdaButton from '../tsc-ai/ada-button.jsx';
+import ConsoleButton from '../tsc-console/console-button.jsx';
 import turboscratchLogo from './turboscratch-logo.svg';
 import {setPlayer} from '../../reducers/mode';
 import {
@@ -906,12 +906,11 @@ class MenuBar extends React.Component {
                             />
                         )}
                         {!this.props.isPlayerOnly && (
-                            <AdaButton
+                            <ConsoleButton
                                 className={classNames(styles.menuBarItem, styles.hoverable)}
                                 isFullScreen={this.props.isFullScreen}
                                 labelClassName={styles.collapsibleLabel}
                                 vm={this.props.vm}
-                                onOpenCommunity={this.props.onClickCommunity}
                             />
                         )}
                         {this.props.onClickAddonSettings && (

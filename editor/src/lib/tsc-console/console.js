@@ -1,8 +1,7 @@
 /* eslint-disable valid-jsdoc */
 /**
- * Ada's debugger console: a running record of what the project does, which
- * both the person (the Console tab) and Ada (the read_console and run_project
- * tools) can read.
+ * The debugger console: a running record of what the project does, shown in
+ * the Console panel (the Console button in the menu bar).
  *
  * It records the green flag and stop, what sprites say and think, broadcasts,
  * variable and list changes (checked a few times a second), clones, compiler
@@ -28,12 +27,9 @@ const ADDON_LOG_BLOCKS = {
 
 let entries = [];
 let nextId = 1;
-let startTime = Date.now();
 const listeners = new Set();
 let notifyQueued = false;
 let attachedVm = null;
-// True while Ada is stopping the project (so the console can say so).
-let stoppingByAda = false;
 
 const clip = (value, max = MAX_TEXT) => clipText(value, max);
 
@@ -84,7 +80,6 @@ const addEntry = (kind, sprite, text) => {
 
 const clearConsole = () => {
     entries = [];
-    startTime = Date.now();
     notify();
 };
 
@@ -95,15 +90,6 @@ const subscribe = listener => {
     listeners.add(listener);
     return () => listeners.delete(listener);
 };
-
-/** A short text version of entries, for Ada. */
-const formatEntries = list => list.map(entry => {
-    const at = time => ((time - startTime) / 1000).toFixed(1);
-    const seconds = at(entry.time);
-    const who = entry.sprite ? ` ${entry.sprite}:` : '';
-    const times = entry.count > 1 ? ` (x${entry.count}, last at ${at(entry.lastTime)}s)` : '';
-    return `[${seconds}s] ${entry.kind}${who} ${entry.text}${times}`;
-}).join('\n');
 
 // ---- variable watching ------------------------------------------------------
 
@@ -196,14 +182,12 @@ const attachConsole = vm => {
     });
     runtime.on('PROJECT_STOP_ALL', () => {
         lastStopAll = Date.now();
-        // Who stopped it: Ada, a "stop all" block (a script is running right
-        // now), or the stop sign.
+        // Who stopped it: a "stop all" block (a script is running right now),
+        // or the stop sign.
         const thread = runtime.sequencer && runtime.sequencer.activeThread;
         let reason = 'Stop sign clicked (everything stopped)';
         let sprite = '';
-        if (stoppingByAda) {
-            reason = 'Ada stopped the project';
-        } else if (thread && thread.target) {
+        if (thread && thread.target) {
             reason = 'a "stop all" block stopped everything';
             sprite = targetName(thread.target);
         }
@@ -288,28 +272,10 @@ const attachConsole = vm => {
     rememberVariables(runtime);
 };
 
-/** Stops the project for Ada, so the console says who stopped it. */
-const stopAllByAda = vm => {
-    stoppingByAda = true;
-    try {
-        vm.stopAll();
-    } finally {
-        stoppingByAda = false;
-    }
-};
-
-/** Records variable changes right away (before the project is stopped, say). */
-const checkVariablesNow = () => {
-    if (attachedVm) checkVariables(attachedVm.runtime);
-};
-
 export {
     attachConsole,
     addEntry,
-    checkVariablesNow,
-    stopAllByAda,
     clearConsole,
-    formatEntries,
     getEntries,
     subscribe
 };

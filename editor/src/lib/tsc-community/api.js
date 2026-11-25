@@ -82,61 +82,6 @@ const request = async (method, path, body) => {
     return data;
 };
 
-/**
- * One turn of a chat with Ada, the AI helper. The server streams its answer as
- * one JSON object per line; onLine gets each of them.
- */
-const streamAiChat = async (messages, onLine, signal) => {
-    const base = getApiBase();
-    if (!base) {
-        throw new ApiError(0, 'This editor isn\'t connected to a TurboScratch server yet.');
-    }
-    const headers = {'Content-Type': 'application/json'};
-    const token = getToken();
-    if (token) headers.Authorization = `Bearer ${token}`;
-    let res;
-    try {
-        res = await fetch(`${base}/api/ai/chat`, {method: 'POST', headers, body: JSON.stringify({messages}), signal});
-    } catch (e) {
-        if (e && e.name === 'AbortError') throw e;
-        throw new ApiError(0, `Couldn't reach the TurboScratch server (${base}).`);
-    }
-    if (!res.ok) {
-        let data = null;
-        try {
-            data = await res.json();
-        } catch (e) {
-            // not JSON
-        }
-        throw new ApiError(res.status, (data && data.error) || `The server said no (${res.status})`);
-    }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    const flush = () => {
-        let newline;
-        while ((newline = buffer.indexOf('\n')) >= 0) {
-            const line = buffer.slice(0, newline).trim();
-            buffer = buffer.slice(newline + 1);
-            if (line) onLine(JSON.parse(line));
-        }
-    };
-    try {
-        for (;;) {
-            const {value, done} = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, {stream: true});
-            flush();
-        }
-        buffer += `${decoder.decode()}\n`;
-        flush();
-    } catch (e) {
-        // Stop reading (and close the connection) when a line reports an error.
-        reader.cancel().catch(() => {});
-        throw e;
-    }
-};
-
 const enc = encodeURIComponent;
 
 const api = {
@@ -176,10 +121,7 @@ const api = {
     declineStudioInvite: inviteId => request('POST', `/api/studios/invites/${inviteId}/decline`),
     addToStudio: (id, projectId) => request('POST', `/api/studios/${id}/projects`, {projectId}),
     removeFromStudio: (id, projectId) => request('DELETE', `/api/studios/${id}/projects/${projectId}`),
-    removeStudioMember: (id, nickname) => request('DELETE', `/api/studios/${id}/members/${enc(nickname)}`),
-
-    aiStatus: () => request('GET', '/api/ai/status'),
-    aiChat: streamAiChat
+    removeStudioMember: (id, nickname) => request('DELETE', `/api/studios/${id}/members/${enc(nickname)}`)
 };
 
 export {

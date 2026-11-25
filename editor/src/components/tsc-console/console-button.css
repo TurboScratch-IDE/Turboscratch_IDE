@@ -1,0 +1,8 @@
+.console-button {
+    position: relative;
+}
+
+.open {
+    background: rgba(255, 255, 255, 0.16);
+    border-radius: 0.5rem;
+}

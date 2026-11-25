@@ -180,48 +180,17 @@ your place and colour in the room.
 - When something looks out of sync, click **Resync project** in the Collaborate
   dialog to reload the room's copy.
 
-## Ada, the AI coding helper
+## Debugger console
 
-Click **Ada** in the menu bar to open a panel with two tabs:
+Click **Console** in the menu bar to open the debugger console. It records what
+your project does while it runs: the green flag and stop, what sprites say and
+think, broadcasts, variable and list changes, clones, compiler problems, and the
+Debugger addon's log / warn / error / breakpoint blocks. It works without an
+account or a server. Drag the panel by its top bar; **Clear** empties it.
 
-- **Console**: a debugger console that records what your project does while it
-  runs: the green flag and stop, what sprites say and think, broadcasts,
-  variable and list changes, clones, compiler problems, and the Debugger addon's
-  log / warn / error / breakpoint blocks. It works without an account or server.
-- **Chat**: Ada, an AI helper. She can read your sprites' scripts, check
-  variables and sprite positions, read the console, and run your project for a
-  few seconds to see what happens, then explain step by step how to fix it. She
-  can't change your project; you make the changes. You need to be signed in.
-
-Ada uses the [Claude API](https://platform.claude.com), which costs money per
-message, so the server owner needs an API key:
-
-1. Create a key at https://platform.claude.com (it needs billing set up; ask a
-   parent if you're not an adult).
-2. Copy `collab-server/.env.example` to `collab-server/.env` and put the key after
-   `ANTHROPIC_API_KEY=`. Online (Render etc.), add `ANTHROPIC_API_KEY` as an
-   environment variable instead.
-3. Restart the server. Never put the key in the editor, in chat, or on GitHub:
-   `.env` is ignored by git.
-
-The key stays on the server; the browser only talks to your TurboScratch server.
-Ada uses Claude Opus 5.5 by default. To spend about 40 times less, set
-`TSC_AI_MODEL=claude-haiku-5-5` (a bit less clever). `TSC_AI_NAME` renames her.
-
-To keep the bill under control, the server counts how much Ada is used per day
-(saved in the database, so restarts don't reset it) in "AI tokens" (answers count
-5×, re-read cached text counts very little). On Claude Opus 5.5, 1,000,000 AI tokens
-cost about $4; on Claude Haiku 5.5 about $0.10.
-
-| Setting | Default | What it limits |
-| --- | --- | --- |
-| `AI_TOKENS_PER_DAY` | 5,000,000 | Everyone together, per day |
-| `AI_TOKENS_PER_USER_PER_DAY` | 1,000,000 | One account, per day |
-| `AI_TOKENS_PER_IP_PER_DAY` | 2,000,000 | One internet connection, per day |
-| `AI_TURNS_PER_DAY` | 150 | Answers per account per day (one question can use several) |
-| `AI_MAX_CONCURRENT` | 8 | Answers being written at the same time |
-
-Also set a monthly spending limit in the Claude Console, just in case.
+Earlier versions had an AI helper called Ada next to the console. The editor no
+longer has her, so a server doesn't need an AI key. Her server side is still in
+`collab-server/ai/` and stays switched off without one.
 
 ## Folders
 
@@ -230,8 +199,8 @@ Also set a monthly spending limit in the Claude Console, just in case.
 | `editor/` | The editor: TurboWarp's `scratch-gui` plus TurboScratch changes |
 | `editor/src/lib/tsc-collab/` | Collaboration engine (session, VM sync, ID-preserving project export) |
 | `editor/src/components/tsc-collab/` | Collaborate dialog and menu-bar button |
-| `editor/src/lib/tsc-ai/`, `editor/src/components/tsc-ai/` | Ada: debugger console, her tools, chat loop and panel |
-| `collab-server/ai/` | Ada's server side (talks to the Claude API) |
+| `editor/src/lib/tsc-console/`, `editor/src/components/tsc-console/` | The debugger console and its panel |
+| `collab-server/ai/` | The old AI helper's server side (the editor doesn't use it; off without a key) |
 | `editor/src/lib/themes/accent/turbo.js` | The TurboScratch color theme (default) |
 | `collab-server/` | The collaboration server (`npm start`, tests with `npm test`) |
 | `branding/` | Logo and app icons |

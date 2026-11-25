@@ -1,0 +1,224 @@
+@import "../../css/colors.css";
+
+.panel {
+    position: fixed;
+    right: 1rem;
+    bottom: 1rem;
+    z-index: 505; /* over the menu bar and stage header, under dialogs */
+    width: 25rem;
+    max-width: calc(100vw - 2rem);
+    height: min(30rem, calc(100vh - 5rem));
+    display: flex;
+    flex-direction: column;
+    border-radius: 1rem;
+    overflow: hidden;
+    background: $ui-modal-background;
+    color: $text-primary;
+    border: 1px solid $ui-black-transparent;
+    box-shadow: 0 1rem 3rem rgba(0, 0, 0, 0.28);
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    font-size: 0.875rem;
+}
+
+/* ---- header ---- */
+
+.header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.55rem 0.6rem 0.55rem 0.75rem;
+    background: $menu-bar-background;
+    background-image: $menu-bar-background-image;
+    color: #ffffff;
+    cursor: grab;
+    user-select: none;
+}
+
+.header-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.9rem;
+    height: 1.9rem;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.18);
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.7);
+    flex-shrink: 0;
+}
+
+.header-title {
+    flex: 1;
+    min-width: 0;
+    line-height: 1.15;
+}
+
+.name {
+    font-weight: bold;
+    font-size: 0.95rem;
+}
+
+.subtitle {
+    font-size: 0.7rem;
+    opacity: 0.85;
+}
+
+.close-button {
+    width: 1.7rem;
+    height: 1.7rem;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: #ffffff;
+    font: inherit;
+    font-size: 1.25rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.close-button:hover {
+    background: rgba(255, 255, 255, 0.25);
+}
+
+.body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+/* ---- console ---- */
+
+.console-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.5rem 0.7rem;
+    border-bottom: 1px solid $ui-black-transparent;
+}
+
+.console-count {
+    flex: 1;
+    font-size: 0.75rem;
+    opacity: 0.7;
+}
+
+.small-button {
+    padding: 0.3rem 0.65rem;
+    border-radius: 0.5rem;
+    border: 1px solid $ui-black-transparent;
+    background: $ui-secondary;
+    color: $text-primary;
+    font: inherit;
+    font-size: 0.75rem;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+.small-button:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.small-button:not(:disabled):hover {
+    border-color: $looks-secondary;
+}
+
+.console-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 0.25rem 0;
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 0.74rem;
+}
+
+.console-empty {
+    padding: 1.5rem;
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    font-size: 0.82rem;
+    line-height: 1.45;
+    text-align: center;
+    opacity: 0.75;
+}
+
+.console-row {
+    display: flex;
+    gap: 0.45rem;
+    padding: 0.22rem 0.7rem;
+    border-left: 3px solid transparent;
+    line-height: 1.35;
+}
+
+.console-row:nth-child(even) {
+    background: $ui-secondary;
+}
+
+.console-time {
+    flex-shrink: 0;
+    opacity: 0.5;
+}
+
+.console-kind {
+    flex-shrink: 0;
+    width: 4.6rem;
+    font-weight: bold;
+    text-transform: uppercase;
+    font-size: 0.66rem;
+    letter-spacing: 0.03em;
+    padding-top: 0.08rem;
+}
+
+.console-text {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+}
+
+.console-sprite {
+    font-weight: bold;
+    margin-right: 0.35rem;
+}
+
+.console-sprite::after {
+    content: ":";
+}
+
+.console-repeat {
+    margin-left: 0.4rem;
+    padding: 0 0.3rem;
+    border-radius: 0.4rem;
+    background: $ui-tertiary;
+    font-size: 0.68rem;
+}
+
+.kind-flag { border-left-color: #4cbf56; }
+.kind-flag .console-kind { color: #2e9a3a; }
+.kind-stop { border-left-color: #ec5959; }
+.kind-stop .console-kind { color: #d94141; }
+.kind-say .console-kind,
+.kind-think .console-kind { color: #8a5cf0; }
+.kind-broadcast .console-kind { color: #cc9900; }
+.kind-variable .console-kind { color: #f07c00; }
+.kind-list .console-kind { color: #e8590c; }
+.kind-clone .console-kind { color: #d98f00; }
+.kind-log .console-kind,
+.kind-project .console-kind { color: #4c97ff; }
+.kind-warn { border-left-color: #ffb020; background: rgba(255, 176, 32, 0.1) !important; }
+.kind-warn .console-kind { color: #c07f00; }
+.kind-error { border-left-color: #ec5959; background: rgba(236, 89, 89, 0.1) !important; }
+.kind-error .console-kind { color: #d94141; }
+.kind-breakpoint { border-left-color: #e05fa8; }
+.kind-breakpoint .console-kind { color: #c2468c; }
+
+@media only screen and (max-width: 600px) {
+    .panel {
+        right: 0.5rem;
+        bottom: 0.5rem;
+        max-width: calc(100vw - 1rem);
+    }
+
+    .console-time {
+        display: none;
+    }
+}
