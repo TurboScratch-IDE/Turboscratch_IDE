@@ -263,7 +263,7 @@ test('room list: listed rooms show up with their title and people, private ones 
     await new Promise(resolve => setTimeout(resolve, 100));
     const rooms = await roomList();
     assert.deepStrictEqual(rooms.find(r => r.room === 'listed-room'),
-        {room: 'listed-room', title: 'My Game', people: 2, names: ['Jo', 'Max']});
+        {room: 'listed-room', title: 'My Game', locked: false, people: 2, names: ['Jo', 'Max']});
     assert.ok(!rooms.some(r => r.room === 'secret-room'), 'a private room is never listed');
     assert.ok(!rooms.some(r => r.room === 'no-choice-room'), 'rooms are private unless chosen');
 

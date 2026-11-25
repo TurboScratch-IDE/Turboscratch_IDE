@@ -7,16 +7,21 @@
  *                      New edits are appended, so a busy room never rewrites
  *                      its whole history.
  *   <room>.json        small settings: which snapshot is current, whether the
- *                      room is listed, its title, ...
+ *                      room is listed, its title, its password's salted hash
+ *                      (never the password itself), ...
  *
- * Crash safety: a new snapshot is written to its own file first, then the
- * edit list and the settings are replaced, and only then are older snapshot
+ * Crash safety: the settings are written first, then the new snapshot to its
+ * own file, then the edit list is replaced, and only then are older snapshot
  * files removed. Whenever the server stops, the newest readable snapshot plus
  * the edits that follow it without a gap give a consistent room, and the
- * snapshot's number says exactly which edits it already contains.
+ * snapshot's number says exactly which edits it already contains. Settings
+ * that name a snapshot that never made it to disk are fine: the newest one
+ * there is used. Writing the settings first means a room with a password
+ * never has a project on disk without its password hash next to it.
  *
  * Damaged files are never silently overwritten: they're renamed to
- * "<name>.damaged-<time>" and whatever can still be read is used.
+ * "<name>.damaged-<time>" and whatever can still be read is used, including
+ * a password hash that can still be read from damaged settings.
  *
  * Older versions kept "<room>.sb3" plus all edits inside "<room>.json"; those
  * rooms are still read, and rewritten in the new form the next time they're
@@ -38,6 +43,39 @@ const ANY_ROOM_FILE = new RegExp(
 );
 const TEMP_FILE = /\.\d+\.tmp$/;
 const USAGE_CACHE_MS = 60 * 1000;
+const MAX_PASSWORD_HASH_LENGTH = 300;
+
+/**
+ * A room password's hash as saved, or null. Anything that isn't a hash made
+ * by the server (see hashPassword in community/auth.js) counts as no password.
+ * @param {*} value what the settings file says
+ * @returns {?string} the hash
+ */
+const savedPasswordHash = value => (
+    typeof value === 'string' && value.startsWith('scrypt$') && value.length <= MAX_PASSWORD_HASH_LENGTH ?
+        value :
+        null
+);
+
+const PASSWORD_HASH_TEXT = /"passwordHash"\s*:\s*"(scrypt\$[^"\\]*)"/;
+const NO_PASSWORD_TEXT = /"passwordHash"\s*:\s*null/;
+
+/**
+ * What the text of a settings file too damaged to read as JSON still says
+ * about the room's password. A locked room must not open to anyone because
+ * a few bytes of its settings were lost (the hash is written near the start,
+ * so even a cut-off file usually still tells).
+ * @param {string} text the damaged file
+ * @returns {{hash: ?string, lost: boolean}} hash: the password hash if it can
+ *     still be read whole; lost: the room may have had one, but it can't be
+ *     read (false when the text shows none, or says nothing about it at all,
+ *     like the settings of rooms saved before room passwords existed)
+ */
+const damagedPasswordHash = text => {
+    const match = PASSWORD_HASH_TEXT.exec(text);
+    const hash = match ? savedPasswordHash(match[1]) : null;
+    return {hash, lost: !hash && text.includes('"passwordHash"') && !NO_PASSWORD_TEXT.test(text)};
+};
 
 /** True for data that starts like a zip file (every .sb3 project does). */
 const isProjectFile = data => Buffer.isBuffer(data) && data.length >= 4 && data[0] === 0x50 && data[1] === 0x4b;
@@ -227,6 +265,8 @@ class RoomStore {
             ops: [],
             listed: false,
             title: null,
+            // Rooms saved before room passwords existed have none.
+            passwordHash: null,
             createdAt: null,
             // True when the files on disk should be rewritten (old format or recovered).
             needsRewrite: false
@@ -234,9 +274,15 @@ class RoomStore {
 
         let meta = {};
         let settingsText = null;
+        // Set when the settings file can't be read as settings (dealt with below).
+        let settingsProblem = null;
         try {
             settingsText = fs.readFileSync(this.file(`${id}.json`), 'utf8');
         } catch (e) {
+            // No settings file next to a project means default settings, so
+            // that room opens without a password. That only happens if
+            // someone deleted the file by hand (or with rooms saved by older
+            // versions): it is written before a room's first snapshot.
             if (e.code !== 'ENOENT') throw cannotReadNow(e);
         }
         if (settingsText !== null) {
@@ -245,9 +291,7 @@ class RoomStore {
                 if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not a settings object');
                 meta = parsed;
             } catch (e) {
-                this.log(`[${id}] room settings are damaged (${e.message}); kept a copy and recovering the rest`);
-                this.moveAside(`${id}.json`);
-                result.needsRewrite = true;
+                settingsProblem = e;
             }
         }
 
@@ -284,6 +328,25 @@ class RoomStore {
             }
             result.needsRewrite = false;
             return result;
+        }
+
+        result.passwordHash = savedPasswordHash(meta.passwordHash);
+        if (settingsProblem) {
+            const salvaged = damagedPasswordHash(settingsText);
+            if (salvaged.lost) {
+                // The room may have had a password, and which one can't be
+                // told any more. Opening it without one could show its
+                // project to anyone: it isn't opened, and the file is left as
+                // it is, until the server owner has looked at it.
+                throw new Error('the room\'s settings are damaged and its password hash can\'t be read; ' +
+                    `fix or remove ${id}.json to open it`);
+            }
+            this.log(`[${id}] room settings are damaged (${settingsProblem.message}); kept a copy and recovering the rest` +
+                `${salvaged.hash ? ', its password included' : ''}`);
+            this.moveAside(`${id}.json`);
+            result.needsRewrite = true;
+            // Written into the new settings file with the next save.
+            result.passwordHash = salvaged.hash;
         }
 
         const current = meta.snapshotFile === result.snapshotFile ||
@@ -342,6 +405,9 @@ class RoomStore {
     settings (room, snapshotFile) {
         return JSON.stringify({
             version: 2,
+            // Near the start: if the file is ever cut off, it most likely
+            // still shows whether the room has a password (see damagedPasswordHash).
+            passwordHash: typeof room.passwordHash === 'string' ? room.passwordHash : null,
             snapshotFile,
             snapshotSeq: room.snapshotSeq,
             snapshotHash: room.snapshotHash,
@@ -360,11 +426,17 @@ class RoomStore {
         fs.mkdirSync(this.dataDir, {recursive: true});
         const name = `${room.id}.${room.snapshotSeq}.sb3`;
         const ops = opsText(room.ops);
+        const older = this.snapshotFiles(room.id);
+        // Settings first (see the top of this file). Except over a room saved
+        // by an older version: its settings hold its edits and say which edit
+        // its snapshot is at, so they're replaced only once the new files are there.
+        const legacy = older.some(old => old.seq === null);
+        if (!legacy) writeFileAtomic(this.file(`${room.id}.json`), this.settings(room, name));
         writeFileAtomic(this.file(name), room.snapshot);
         writeFileAtomic(this.file(`${room.id}.ops`), ops);
-        writeFileAtomic(this.file(`${room.id}.json`), this.settings(room, name));
+        if (legacy) writeFileAtomic(this.file(`${room.id}.json`), this.settings(room, name));
         let added = room.snapshot.length + Buffer.byteLength(ops);
-        for (const old of this.snapshotFiles(room.id)) {
+        for (const old of older) {
             if (old.name === name) continue;
             try {
                 const size = fs.statSync(this.file(old.name)).size;
@@ -390,7 +462,7 @@ class RoomStore {
         if (this.usageCache) this.usageCache.bytes = Math.max(0, this.usageCache.bytes + bytes);
     }
 
-    /** Saves only the settings (listed, title...). */
+    /** Saves only the settings (listed, title, password hash...). */
     saveSettings (room, snapshotFile) {
         writeFileAtomic(this.file(`${room.id}.json`), this.settings(room, snapshotFile));
     }

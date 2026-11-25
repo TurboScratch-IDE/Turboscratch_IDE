@@ -28,6 +28,7 @@
 'use strict';
 
 const http = require('http');
+const net = require('net');
 const path = require('path');
 const crypto = require('crypto');
 const {WebSocketServer} = require('ws');
@@ -40,6 +41,7 @@ try {
 }
 const {openDatabase} = require('./community/db');
 const {createCommunityApi} = require('./community/api');
+const {hashPassword, verifyPassword, clientIp, RateLimiter} = require('./community/auth');
 const {RoomStore, isProjectFile, nestingTooDeep} = require('./room-store');
 
 const numberSetting = (name, fallback) => {
@@ -81,7 +83,7 @@ const MAX_CLIENT_BACKLOG_BYTES = 2 * MAX_MESSAGE_BYTES + 128 * 1024 * 1024;
 const STATE_CACHE_MS = 60000;
 // An empty room stays in memory this long, so people reconnecting or
 // reloading the page don't make the server read it from disk again.
-const EMPTY_ROOM_KEEP_MS = 30000;
+const EMPTY_ROOM_KEEP_MS = numberSetting('EMPTY_ROOM_KEEP_MS', 30000);
 // A connection must say which room it wants within this time.
 const HELLO_TIMEOUT_MS = numberSetting('HELLO_TIMEOUT_MS', 30000) || 30000;
 // How long people wait for a new room's first project before being told.
@@ -106,6 +108,62 @@ const MAX_CHAT_LENGTH = 500;
 const MAX_TITLE_LENGTH = 60;
 const MAX_LISTED_ROOMS = 100;
 const MAX_LISTED_NAMES = 5;
+// Room passwords. Only a salted hash of a password is kept (see auth.js).
+const MIN_ROOM_PASSWORD_LENGTH = 4;
+const MAX_ROOM_PASSWORD_LENGTH = 100;
+// Wrong room passwords allowed per room and address, and per room from
+// everyone, in PASSWORD_TRIES_WINDOW_MS. Everyone behind the same tunnel or
+// school network shares one address, so the first limit can't be tiny.
+const PASSWORD_TRIES_WINDOW_MS = 10 * 60 * 1000;
+const PASSWORD_TRIES_PER_IP = numberSetting('ROOM_PASSWORD_TRIES_PER_IP', 10) || 10;
+const PASSWORD_TRIES_PER_ROOM = numberSetting('ROOM_PASSWORD_TRIES_PER_ROOM', 30) || 30;
+// Checking or hashing a room password (scrypt) is slow and uses 16 MB on
+// purpose. At most this many run at once; at most this many more wait for
+// their turn (a class joining at the same moment), the rest are told to retry.
+const MAX_PASSWORD_WORK_AT_ONCE = 8;
+const MAX_PASSWORD_WORK_WAITING = 64;
+// Hashing a new password (a new locked room, or a password change) may only
+// use part of that: a hello costs nothing but a new connection, so without
+// this anyone could keep every slot busy with made-up rooms, and nobody could
+// join an existing locked room. Checks for those always go first.
+const MAX_PASSWORD_HASHES_AT_ONCE = 4;
+const MAX_PASSWORD_HASHES_WAITING = 16;
+// ...and one address can have only this many running or waiting at once, and
+// start only so many a minute (a whole class shares one address, so a few).
+const MAX_PASSWORD_HASHES_PER_ADDRESS = 2;
+const PASSWORD_HASHES_PER_MINUTE = numberSetting('ROOM_PASSWORD_HASHES_PER_MINUTE', 10) || 10;
+// Checks get a share per address too: right passwords are never counted as
+// tries, so without it one address could keep every slot and waiting place
+// busy by joining its own locked room over and over, and nobody else could
+// join theirs. A whole class shares one address, so this can't be tiny.
+const MAX_PASSWORD_CHECKS_PER_ADDRESS = numberSetting('ROOM_PASSWORD_CHECKS_PER_ADDRESS', 16) || 16;
+// Checks may never use this many of the running slots: a new password (a
+// new locked room, a password change) always has one to start in.
+const PASSWORD_SLOTS_ONLY_FOR_HASHING = 1;
+// A room's password can change while someone's password is being checked:
+// then it's checked again, at most this many more times.
+const MAX_PASSWORD_RECHECKS = 3;
+// How often one person can set or remove the room's password.
+const MAX_PASSWORD_CHANGES_PER_MINUTE = 10;
+// Someone let into a room whose connection then drops can come back with the
+// resume token from their welcome without the password (it may have changed
+// while they were in the room, or they never typed it), for this long, while
+// the room is in memory, and while its password is still the one it had when
+// they dropped. Only the last ones per room are kept.
+const DROPPED_MEMBER_KEEP_MS = numberSetting('DROPPED_MEMBER_KEEP_MS', 6 * 60 * 60 * 1000);
+const MAX_DROPPED_MEMBERS_PER_ROOM = 200;
+// ...and at most this many from one address (a whole class shares one), so
+// one address can't keep lots of them or push out everyone else's.
+const MAX_DROPPED_MEMBERS_PER_ADDRESS = MAX_CLIENTS_PER_ROOM;
+// After the password changes, the old password the editor of someone who
+// dropped out of the locked room still sends isn't counted as guessing. Only
+// this many such checks per room and password (as many people as can be in
+// a room) are free: tokens saved up by joining and dropping again and again
+// give no more than that, and the rest count like anyone's.
+const MAX_UNCOUNTED_CHECKS_PER_PASSWORD = MAX_CLIENTS_PER_ROOM;
+// The close code the editor uses when it closes a connection in order to
+// connect again (it looked dead). Leave is a plain close.
+const CLOSE_RECONNECTING = 4000;
 
 const COLORS = [
     '#ff6b6b', '#4dabf7', '#51cf66', '#fcc419', '#cc5de8',
@@ -194,19 +252,380 @@ const send = (ws, message) => sendData(ws, typeof message === 'string' ? message
 
 const jsonBuffer = message => Buffer.from(JSON.stringify(message));
 
+/**
+ * The address the per-address limits use. An IPv6 address counts by its /64
+ * prefix: one home or phone usually gets a whole /64, so it could use a new
+ * address for each connection. An IPv4 address counts as itself, also when it
+ * is written the IPv6 way (::ffff:1.2.3.4).
+ * @param {string} ip the connection's address (see clientIp)
+ * @returns {string} the address for the limits
+ */
+const addressKey = ip => {
+    const address = String(ip).split('%')[0];
+    if (!net.isIPv6(address)) return ip;
+    const groups = text => (text ? text.split(':') : []).flatMap(piece => {
+        if (!piece.includes('.')) return [parseInt(piece, 16)];
+        const bytes = piece.split('.').map(Number);
+        return [(bytes[0] << 8) | bytes[1], (bytes[2] << 8) | bytes[3]];
+    });
+    const [head, tail] = address.split('::');
+    const start = groups(head);
+    const end = groups(tail);
+    const all = [...start, ...new Array(8 - start.length - end.length).fill(0), ...end];
+    if (all.slice(0, 5).every(group => group === 0) && all[5] === 0xffff) {
+        return [all[6] >> 8, all[6] & 0xff, all[7] >> 8, all[7] & 0xff].join('.');
+    }
+    return `${all.slice(0, 4).map(group => group.toString(16)).join(':')}::/64`;
+};
+
+/**
+ * Who shares one turn in the password-check line (see checkRoomPassword).
+ * Wider than addressKey for IPv6: one network often owns a whole /48 or /56,
+ * so counting by /64 there would let it act like hundreds of people and push
+ * everyone else out of the line. The wrong-password limits still use the /64.
+ * @param {string} address an address from addressKey
+ * @returns {string} the key for the check line
+ */
+const checkShareKey = address => {
+    if (!address.endsWith('::/64')) return address;
+    return `${address.slice(0, -'::/64'.length).split(':')
+        .slice(0, 3)
+        .join(':')}::/48`;
+};
+
+/** What is kept of a resume token: a memory dump can't be used to get into a room. */
+const tokenHash = token => crypto.createHash('sha256').update(token)
+    .digest('base64');
+
 /** Sends an error and closes the connection (the editor shows or handles it). */
 const refuse = (ws, code, message) => {
     send(ws, {t: 'error', code, message});
     ws.close();
 };
 
-/** Refuses something a person in a room did: nothing more from that connection is used. */
+/**
+ * Refuses something a person in a room did: nothing more from that connection
+ * is used. Their editor usually reconnects by itself, so this counts as a
+ * dropped connection, not as Leave (see ws.on('close')).
+ */
 const refuseClient = (client, code, message) => {
     client.closing = true;
     refuse(client.ws, code, message);
 };
 
+/**
+ * Answers a room-settings message that couldn't be done. The connection stays
+ * open: "for" tells the editor this is about the change it asked for, so it
+ * just says so instead of leaving the room.
+ */
+const refuseSettings = (client, code, message) => {
+    send(client.ws, {t: 'error', code, for: 'room-settings', message});
+};
+
 const SERVER_FULL_MESSAGE = 'This server has no space for new rooms right now. Existing rooms still work.';
+const BUSY_MESSAGE = 'The server is busy right now. Try again in a minute.';
+const PASSWORD_BUSY_MESSAGE = 'The server was too busy to change the room\'s password. Try again in a minute.';
+const PASSWORD_NEEDED_MESSAGE = 'This room has a password. Type it to join.';
+const PASSWORD_TOO_SHORT = `Room passwords need at least ${MIN_ROOM_PASSWORD_LENGTH} characters`;
+const PASSWORD_TOO_LONG = `Room passwords can be at most ${MAX_ROOM_PASSWORD_LENGTH} characters`;
+const TOO_MANY_TRIES_MESSAGE = 'Too many wrong passwords for this room. Wait a few minutes and try again.';
+const TOO_MANY_HASHES_MESSAGE = 'Too many room passwords were set from your network just now. Try again in a minute.';
+const TOO_MANY_CHANGES_MESSAGE = 'You changed the room\'s password too often. Try again in a minute.';
+
+/**
+ * Counts wrong room passwords. A check that is still running might turn out
+ * wrong, so it counts as a try until it is done: lots of guesses sent at the
+ * same moment can't get past the limit together.
+ */
+class PasswordTries extends RateLimiter {
+    constructor (limit, windowMs) {
+        super(limit, windowMs);
+        /** @type {Map<string, number>} checks running now, per key */
+        this.running = new Map();
+    }
+
+    /** Wrong tries `key` has left in this window (checks still running not counted). */
+    left (key) {
+        const entry = this.entry(key, false);
+        return this.limit - (entry ? entry.count : 0);
+    }
+
+    /** True when another check for `key` must wait: the running ones could use its last tries. */
+    full (key) {
+        return (this.running.get(key) || 0) >= this.left(key);
+    }
+
+    started (key) {
+        this.running.set(key, (this.running.get(key) || 0) + 1);
+    }
+
+    finished (key) {
+        const count = (this.running.get(key) || 0) - 1;
+        if (count > 0) {
+            this.running.set(key, count);
+        } else {
+            this.running.delete(key);
+        }
+    }
+}
+
+const wrongPasswordsPerAddress = new PasswordTries(PASSWORD_TRIES_PER_IP, PASSWORD_TRIES_WINDOW_MS);
+const wrongPasswordsPerRoom = new PasswordTries(PASSWORD_TRIES_PER_ROOM, PASSWORD_TRIES_WINDOW_MS);
+const passwordChanges = new RateLimiter(MAX_PASSWORD_CHANGES_PER_MINUTE, 60 * 1000);
+
+/** The wrong-password limits a check of `roomId`'s password from `ip` counts against. */
+const passwordGuards = (roomId, ip) => [
+    {tries: wrongPasswordsPerAddress, key: `${roomId} ${ip}`},
+    {tries: wrongPasswordsPerRoom, key: roomId}
+];
+
+const tooManyTries = guards => guards.some(guard => guard.tries.blocked(guard.key));
+
+/**
+ * Room password work (scrypt) running now, and work waiting for its turn.
+ * Checks (someone joining an existing locked room) and hashing (a new
+ * password) wait in separate lines. When a slot frees up, checks go first,
+ * and hashing may only use part of the slots and waiting places (see
+ * MAX_PASSWORD_HASHES_AT_ONCE), so made-up new rooms can't keep people out.
+ * Checks can't use every slot either (see PASSWORD_SLOTS_ONLY_FOR_HASHING),
+ * so a flood of them can't stop passwords from being set.
+ *
+ * Waiting checks are kept per address, and addresses take turns (see
+ * startWaitingChecks), so a few addresses checking over and over can't make
+ * everyone else wait behind all of their checks, or fill every waiting place
+ * (see makeRoomForCheck).
+ */
+const passwordWork = {
+    running: 0,
+    hashesRunning: 0,
+    /** @type {Map<string, Array<object>>} address -> its waiting checks, oldest first (the address whose turn is next first) */
+    checks: new Map(),
+    checksWaiting: 0,
+    hashes: []
+};
+
+/**
+ * @param {{hashing: boolean, guards: Array<object>, address: string}} job
+ *     hashing or a check, the wrong-password limits it counts against (none
+ *     for hashing), and who asked for it
+ * @returns {boolean} whether it may start now
+ */
+const passwordWorkCanStart = job => passwordWork.running < MAX_PASSWORD_WORK_AT_ONCE &&
+    (job.hashing ?
+        passwordWork.hashesRunning < MAX_PASSWORD_HASHES_AT_ONCE :
+        passwordWork.running - passwordWork.hashesRunning < MAX_PASSWORD_WORK_AT_ONCE - PASSWORD_SLOTS_ONLY_FOR_HASHING) &&
+    job.guards.every(guard => !guard.tries.full(guard.key));
+
+const passwordWorkCanWait = job => passwordWork.checksWaiting + passwordWork.hashes.length < MAX_PASSWORD_WORK_WAITING &&
+    (!job.hashing || passwordWork.hashes.length < MAX_PASSWORD_HASHES_WAITING);
+
+const startPasswordWork = job => {
+    passwordWork.running++;
+    if (job.hashing) passwordWork.hashesRunning++;
+    for (const guard of job.guards) guard.tries.started(guard.key);
+};
+
+/** Puts work in its line to wait for its turn. */
+const waitForTurn = waiting => {
+    if (waiting.job.hashing) {
+        passwordWork.hashes.push(waiting);
+        return;
+    }
+    // An address with nothing waiting yet gets its turn after those already waiting.
+    const line = passwordWork.checks.get(waiting.job.address);
+    if (line) {
+        line.push(waiting);
+    } else {
+        passwordWork.checks.set(waiting.job.address, [waiting]);
+    }
+    passwordWork.checksWaiting++;
+};
+
+/**
+ * Every waiting place is taken, and a check from `job.address` arrives. If
+ * that address has fewer checks waiting than the address with the most, the
+ * newest check of that address makes way (it is told the server is busy).
+ * So one address can't keep more than its share of the waiting places, and
+ * someone new always gets one.
+ * @param {object} job the check that arrived
+ * @returns {boolean} whether a place was made for it
+ */
+const makeRoomForCheck = job => {
+    const own = (passwordWork.checks.get(job.address) || []).length;
+    let most = null;
+    for (const entry of passwordWork.checks) {
+        if (!most || entry[1].length >= most[1].length) most = entry;
+    }
+    if (!most || most[1].length <= own) return false;
+    const [address, line] = most;
+    const newest = line.pop();
+    passwordWork.checksWaiting--;
+    if (line.length === 0) passwordWork.checks.delete(address);
+    newest.resolve('busy');
+    return true;
+};
+
+/** Starts what has waited longest in one line, as far as the limits allow; returns who still waits. */
+const startWaitingWork = line => line.filter(waiting => {
+    if (tooManyTries(waiting.job.guards)) {
+        waiting.resolve('blocked');
+        return false;
+    }
+    if (!passwordWorkCanStart(waiting.job)) return true;
+    startPasswordWork(waiting.job);
+    waiting.resolve('go');
+    return false;
+});
+
+/**
+ * Starts waiting checks as far as the limits allow, one address at a time:
+ * each turn starts the oldest check of that address that may start, and the
+ * address then goes to the end of the line. The address whose check started
+ * longest ago goes first.
+ */
+const startWaitingChecks = () => {
+    for (let startedOne = true; startedOne;) {
+        startedOne = false;
+        for (const [address, line] of [...passwordWork.checks]) {
+            let started = false;
+            const waiting = line.filter(entry => {
+                if (tooManyTries(entry.job.guards)) {
+                    entry.resolve('blocked');
+                    return false;
+                }
+                if (started || !passwordWorkCanStart(entry.job)) return true;
+                startPasswordWork(entry.job);
+                entry.resolve('go');
+                started = true;
+                return false;
+            });
+            passwordWork.checksWaiting -= line.length - waiting.length;
+            // (Setting an address that is still there keeps its place in the line.)
+            if (started || waiting.length === 0) passwordWork.checks.delete(address);
+            if (waiting.length > 0) passwordWork.checks.set(address, waiting);
+            if (started) startedOne = true;
+        }
+    }
+};
+
+/** Work that is done makes room: waiting checks first, then waiting hashing. */
+const finishPasswordWork = job => {
+    passwordWork.running--;
+    if (job.hashing) passwordWork.hashesRunning--;
+    for (const guard of job.guards) guard.tries.finished(guard.key);
+    startWaitingChecks();
+    passwordWork.hashes = startWaitingWork(passwordWork.hashes);
+};
+
+/**
+ * Hashes or checks a room password when its turn comes (see MAX_PASSWORD_WORK_AT_ONCE).
+ * @param {{hashing: boolean, guards: Array<object>, address: string}} job what
+ *     kind of work, the wrong-password limits it counts against (none for
+ *     hashing), and the address of who asked for it
+ * @param {function(): Promise<*>} task the work; a check counts its own wrong result
+ * @returns {Promise<{turn: string, result: *}>} turn: 'done' (result is set), 'busy'
+ *     (too much work waiting already, or it made way for someone else's) or
+ *     'blocked' (no wrong tries left)
+ */
+const doPasswordWork = async (job, task) => {
+    let turn;
+    if (tooManyTries(job.guards)) {
+        turn = 'blocked';
+    } else if (passwordWorkCanStart(job)) {
+        startPasswordWork(job);
+        turn = 'go';
+    } else if (!passwordWorkCanWait(job) && (job.hashing || !makeRoomForCheck(job))) {
+        turn = 'busy';
+    } else {
+        turn = await new Promise(resolve => waitForTurn({job, resolve}));
+    }
+    if (turn !== 'go') return {turn, result: null};
+    try {
+        return {turn: 'done', result: await task()};
+    } finally {
+        finishPasswordWork(job);
+    }
+};
+
+/**
+ * Runs `work` while it counts as one more for `address` in `perAddress`
+ * (running or waiting password work, per address).
+ * @param {Map<string, number>} perAddress the counts
+ * @param {string} address the connection's address
+ * @param {function(): Promise<*>} work the work
+ * @returns {Promise<*>} what the work gave
+ */
+const countedPerAddress = async (perAddress, address, work) => {
+    perAddress.set(address, (perAddress.get(address) || 0) + 1);
+    try {
+        return await work();
+    } finally {
+        const left = perAddress.get(address) - 1;
+        if (left > 0) {
+            perAddress.set(address, left);
+        } else {
+            perAddress.delete(address);
+        }
+    }
+};
+
+/** Password checks each address has running or waiting right now. */
+const checksPerAddress = new Map();
+
+/**
+ * Checks a password against a room's password hash. A wrong one is counted
+ * before the next check may start. The result is null when nobody wanted the
+ * answer any more by the time its turn came (nothing was checked or counted).
+ * An address that already has its share of checks running or waiting gets
+ * 'busy' (see MAX_PASSWORD_CHECKS_PER_ADDRESS): those still count while they
+ * wait, even if their connection is gone, so closing them doesn't get round it.
+ * @param {string} address the connection's address
+ * @param {Array<object>} guards the wrong-password limits it counts against
+ *     (none for a check that must not count, see joinRoom)
+ * @param {string} password the password sent
+ * @param {string} hash the room's password hash
+ * @param {function(): boolean} wanted false once nobody wants the answer any more
+ * @returns {Promise<{turn: string, result: ?boolean}>} see doPasswordWork
+ */
+const checkRoomPassword = (address, guards, password, hash, wanted) => {
+    const share = checkShareKey(address);
+    if ((checksPerAddress.get(share) || 0) >= MAX_PASSWORD_CHECKS_PER_ADDRESS) {
+        return Promise.resolve({turn: 'busy', result: null});
+    }
+    return countedPerAddress(checksPerAddress, share, () => doPasswordWork({hashing: false, guards, address: share}, async () => {
+        if (!wanted()) return null;
+        const matches = await verifyPassword(password, hash);
+        if (!matches) {
+            for (const guard of guards) guard.tries.hit(guard.key);
+        }
+        return matches;
+    }));
+};
+
+/** Password hashing each address has running or waiting right now. */
+const hashesPerAddress = new Map();
+const passwordHashesPerAddress = new RateLimiter(PASSWORD_HASHES_PER_MINUTE, 60 * 1000);
+
+/**
+ * Whether `address` may have another room password hashed now (then it is
+ * counted, and hashRoomPassword must follow right away). New connections
+ * cost nothing, so this is per address, not per connection or person.
+ * @param {string} address the connection's address
+ * @returns {boolean} false when it has too many running or waiting, or started too many this minute
+ */
+const mayHashPassword = address => (hashesPerAddress.get(address) || 0) < MAX_PASSWORD_HASHES_PER_ADDRESS &&
+    passwordHashesPerAddress.hit(address);
+
+/**
+ * Hashes a new room password (a new locked room, or a password change) when
+ * its turn comes. Call mayHashPassword first.
+ * @param {string} address the connection's address
+ * @param {string} password the new password
+ * @param {function(): boolean} wanted false once nobody wants it any more (the result is then null)
+ * @returns {Promise<{turn: string, result: ?string}>} see doPasswordWork
+ */
+const hashRoomPassword = (address, password, wanted) => countedPerAddress(hashesPerAddress, address,
+    () => doPasswordWork({hashing: true, guards: [], address}, () => (wanted() ? hashPassword(password) : null)));
 
 /**
  * The room's project as a "snapshot" message, built straight into one Buffer
@@ -273,6 +692,31 @@ class Room {
         // private unless the person who created them chose otherwise.
         this.listed = false;
         this.title = null;
+        // A room with a password lets in only people who type it (or who were
+        // already let in and are reconnecting). Only a salted hash is kept.
+        this.passwordHash = null;
+        // Counts password changes, so when several overlap the last one wins.
+        this.passwordRequest = 0;
+        // Goes up each time the password is set, changed or removed (see
+        // setPasswordHash), so a remembered token can tell whether the
+        // password is still the one from when that person dropped out.
+        this.passwordVersion = 0;
+        // Checks of an old password that are not counted as guessing, left
+        // for the password as it is now (see joinRoom).
+        this.uncountedChecksLeft = MAX_UNCOUNTED_CHECKS_PER_PASSWORD;
+        // People whose hello is still being checked (their password takes a
+        // moment): the room isn't forgotten under them.
+        this.pendingHellos = 0;
+        /**
+         * People let in whose connection then dropped: they may come back
+         * without the password (see DROPPED_MEMBER_KEEP_MS) while it is the
+         * same as when they dropped. Only a hash of their resume token is
+         * kept, oldest first.
+         * @type {Map<string, {droppedAt: number, version: number, locked: boolean, address: string}>}
+         *     token hash -> when they dropped, the room's passwordVersion then
+         *     and whether it had a password then, and their address
+         */
+        this.droppedMembers = new Map();
         this.createdAt = Date.now();
         // What's on disk: the snapshot file, and edits not written there yet.
         this.savedSnapshotFile = null;
@@ -312,6 +756,7 @@ class Room {
         this.seq = saved.seq;
         this.listed = saved.listed;
         this.title = sanitizeTitle(saved.title);
+        this.passwordHash = saved.passwordHash;
         if (saved.createdAt !== null) this.createdAt = saved.createdAt;
         this.savedSnapshotFile = saved.snapshotFile;
         this.needsFullSave = saved.needsRewrite;
@@ -376,6 +821,10 @@ class Room {
         try {
             store.saveSettings(this, this.savedSnapshotFile);
         } catch (e) {
+            // The next save (the next edit, or when the room empties) rewrites
+            // everything, settings included: a new password must not be lost
+            // just because the disk failed once.
+            this.needsFullSave = true;
             log(`[${this.id}] could not save room settings:`, e.message);
         }
     }
@@ -624,6 +1073,7 @@ class Room {
             hasProject: !!this.snapshot,
             listed: this.listed,
             title: this.title,
+            locked: !!this.passwordHash,
             // Lets this person take their place back if their connection drops.
             resume: client.resumeToken
         });
@@ -712,24 +1162,142 @@ class Room {
             if (names.length >= MAX_LISTED_NAMES) break;
             names.push(client.name);
         }
-        return {room: this.id, title: this.title, people: this.clients.size, names};
+        // Locked rooms can be listed too: joining one from the list asks for its password.
+        return {room: this.id, title: this.title, locked: !!this.passwordHash, people: this.clients.size, names};
     }
 
-    /** Anyone in the room can show it in the room list or make it private again. */
-    setListed (client, listed) {
-        if (!client.ready || typeof listed !== 'boolean' || listed === this.listed) return;
-        this.listed = listed;
-        log(`[${this.id}] ${client.name} made the room ${listed ? 'listed' : 'private'}`);
-        this.broadcast({t: 'room-info', listed, title: this.title, by: client.id});
-        this.saveSettings();
+    /**
+     * Tells everyone in the room about one change to its settings (never the
+     * password or its hash: only whether there is one).
+     * @param {object} client who changed it
+     * @param {string} changed 'listed', 'title', 'password-set' or 'password-removed'
+     */
+    settingsChanged (client, changed) {
+        this.broadcast({
+            t: 'room-info',
+            listed: this.listed,
+            title: this.title,
+            locked: !!this.passwordHash,
+            by: client.id,
+            changed
+        });
+    }
+
+    /**
+     * Anyone in the room can show it in the room list or make it private
+     * again, rename it, and set, change or remove its password. One message
+     * can do several of these; each change is announced on its own.
+     */
+    changeSettings (client, message) {
+        if (!client.ready) return;
+        let changed = false;
+        if (typeof message.listed === 'boolean' && message.listed !== this.listed) {
+            this.listed = message.listed;
+            log(`[${this.id}] ${client.name} made the room ${this.listed ? 'listed' : 'private'}`);
+            this.settingsChanged(client, 'listed');
+            changed = true;
+        }
+        if (typeof message.title === 'string' || message.title === null) {
+            // Same cleaning as a new room's title; nothing visible left means no name.
+            const title = sanitizeTitle(message.title);
+            if (title !== this.title) {
+                this.title = title;
+                log(`[${this.id}] ${client.name} ${title ? 'renamed the room' : 'removed the room\'s name'}`);
+                this.settingsChanged(client, 'title');
+                changed = true;
+            }
+        }
+        if (changed) this.saveSettings();
+        if (message.password !== undefined) this.changePassword(client, message.password);
+    }
+
+    /**
+     * Sets, changes (a string) or removes (null or '') the room's password.
+     * Hashing takes a moment; when changes overlap, the one asked for last wins.
+     */
+    changePassword (client, password) {
+        if (password !== null && typeof password !== 'string') return;
+        if (password && (password.length < MIN_ROOM_PASSWORD_LENGTH || password.length > MAX_ROOM_PASSWORD_LENGTH)) {
+            // The editor checks this too.
+            refuseSettings(client, 'bad-password',
+                password.length > MAX_ROOM_PASSWORD_LENGTH ? PASSWORD_TOO_LONG : PASSWORD_TOO_SHORT);
+            return;
+        }
+        if (!password && !this.passwordHash) return;
+        // Each change costs the server a hash, so there are limits. A refused
+        // change is refused before it counts as asked for, so it can't cancel
+        // an earlier one that is still being hashed.
+        if (!passwordChanges.hit(client.id)) {
+            refuseSettings(client, 'busy', TOO_MANY_CHANGES_MESSAGE);
+            return;
+        }
+        if (password && !mayHashPassword(client.ip)) {
+            refuseSettings(client, 'busy', TOO_MANY_HASHES_MESSAGE);
+            return;
+        }
+        const request = ++this.passwordRequest;
+        if (!password) {
+            this.setPasswordHash(null);
+            log(`[${this.id}] ${client.name} removed the room's password`);
+            this.settingsChanged(client, 'password-removed');
+            this.saveSettings();
+            return;
+        }
+        // Gone meanwhile, or someone changed the password again after this:
+        // nothing to hash or say any more.
+        const stillWanted = () => this.clients.get(client.id) === client && !client.closing &&
+            request === this.passwordRequest;
+        hashRoomPassword(client.ip, password, stillWanted)
+            .then(outcome => {
+                if (outcome.turn !== 'done') {
+                    if (stillWanted()) refuseSettings(client, 'busy', PASSWORD_BUSY_MESSAGE);
+                    return;
+                }
+                if (!stillWanted() || !outcome.result) return;
+                this.setPasswordHash(outcome.result);
+                log(`[${this.id}] ${client.name} set a new password for the room`);
+                this.settingsChanged(client, 'password-set');
+                this.saveSettings();
+            })
+            .catch(e => {
+                log(`[${this.id}] could not set the room's password:`, e && e.message);
+                if (stillWanted()) refuseSettings(client, 'busy', PASSWORD_BUSY_MESSAGE);
+            });
+    }
+
+    /**
+     * Sets, changes or removes (null) the room's password hash. Tokens of
+     * people who dropped out before this stop being a pass (see joinRoom):
+     * they weren't here for the change, so nobody here saw them get it.
+     * @param {?string} hash the new hash
+     */
+    setPasswordHash (hash) {
+        this.passwordHash = hash;
+        this.passwordVersion++;
+        this.uncountedChecksLeft = MAX_UNCOUNTED_CHECKS_PER_PASSWORD;
+    }
+
+    /**
+     * Uses up one check that isn't counted as guessing, if the room's
+     * password as it is now has any left (see joinRoom).
+     * @returns {boolean} whether there was one
+     */
+    takeUncountedCheck () {
+        if (this.uncountedChecksLeft <= 0) return false;
+        this.uncountedChecksLeft--;
+        return true;
     }
 
     /**
      * @param {object} client the person leaving
-     * @param {boolean} dropped whether the connection broke (rather than being closed on purpose)
+     * @param {boolean} dropped whether they are expected back on their own
+     *     (the connection broke, their editor is reconnecting, or the server
+     *     closed it), rather than having clicked Leave
      */
     leave (client, dropped) {
         if (!this.removeClient(client)) return;
+        // Someone who clicked Leave needs the password again to come back.
+        if (dropped) this.rememberDropped(client);
         if (!this.snapshot && client.ready && this.clients.size > 0 && !this.creatorGrace) {
             if (dropped && CREATOR_GRACE_MS > 0) {
                 // The creator's connection broke before their project arrived.
@@ -751,6 +1319,59 @@ class Room {
         } else if (this.ops.length > 0) {
             this.scheduleSnapshot();
         }
+    }
+
+    /**
+     * Someone who was let in lost their connection (Wi-Fi, a laptop going to
+     * sleep, the heartbeat giving up on them, the server closing it). Their
+     * editor reconnects with the resume token from its welcome, maybe with a
+     * password that is out of date or none at all: that must neither shut
+     * them out nor count as guessing (enough wrong guesses would block the
+     * room for everyone). The password as it is now is noted with it: if it
+     * changes before they are back, the token no longer lets them past it.
+     * @param {object} client the person who dropped out (their resume token and address)
+     */
+    rememberDropped (client) {
+        if (DROPPED_MEMBER_KEEP_MS <= 0) return;
+        const now = Date.now();
+        // Oldest first: drop the ones too old, then any over the limit.
+        for (const [key, {droppedAt}] of this.droppedMembers) {
+            if (now - droppedAt <= DROPPED_MEMBER_KEEP_MS && this.droppedMembers.size < MAX_DROPPED_MEMBERS_PER_ROOM) {
+                break;
+            }
+            this.droppedMembers.delete(key);
+        }
+        // The oldest one from their address makes way if it has too many.
+        const fromThere = [...this.droppedMembers].filter(([, dropped]) => dropped.address === client.ip);
+        if (fromThere.length >= MAX_DROPPED_MEMBERS_PER_ADDRESS) this.droppedMembers.delete(fromThere[0][0]);
+        this.droppedMembers.set(tokenHash(client.resumeToken), {
+            droppedAt: now,
+            version: this.passwordVersion,
+            // Only someone who dropped out while the room had a password can
+            // have an old one that their editor still sends (see joinRoom).
+            locked: !!this.passwordHash,
+            address: client.ip
+        });
+    }
+
+    /**
+     * @param {string} token a resume token
+     * @returns {?{version: number, locked: boolean}} the room's passwordVersion
+     *     when the person with this token dropped out lately, and whether it
+     *     had a password then; null if it isn't such a token
+     */
+    droppedMember (token) {
+        const key = tokenHash(token);
+        const dropped = this.droppedMembers.get(key);
+        if (!dropped) return null;
+        if (Date.now() - dropped.droppedAt <= DROPPED_MEMBER_KEEP_MS) return dropped;
+        this.droppedMembers.delete(key);
+        return null;
+    }
+
+    /** A resume token works once: whoever used it gets a new one in their welcome. */
+    forgetDropped (token) {
+        this.droppedMembers.delete(tokenHash(token));
     }
 
     /** Takes someone off the room's list (they left, or connected again). */
@@ -789,10 +1410,21 @@ class Room {
             return;
         }
         this.saveAll();
+        this.closeSoon();
+    }
+
+    /**
+     * Forgets the room (which has a project) EMPTY_ROOM_KEEP_MS from now,
+     * unless someone is in it by then. Until then, people reconnecting, or
+     * knocking without the right password, don't make the server read a
+     * possibly big project from disk again.
+     */
+    closeSoon () {
         clearTimeout(this.closeTimer);
         this.closeTimer = setTimeout(() => {
             this.closeTimer = null;
-            if (this.clients.size > 0) return;
+            // Someone on their way in: forgotten later if they don't get in (see forgetIfUnused).
+            if (this.clients.size > 0 || this.pendingHellos > 0) return;
             this.close();
             log(`[${this.id}] empty, saved and closed`);
         }, EMPTY_ROOM_KEEP_MS);
@@ -809,6 +1441,8 @@ class Room {
         this.stateCache = null;
         if (this.creatorGrace) clearTimeout(this.creatorGrace.timer);
         this.creatorGrace = null;
+        // Whoever dropped out of it needs the password from now on.
+        this.droppedMembers.clear();
         this.saveAll();
         if (this.snapshot) store.touch(this.id);
         if (rooms.get(this.id) === this) rooms.delete(this.id);
@@ -873,78 +1507,237 @@ const httpServer = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({server: httpServer, maxPayload: MAX_MESSAGE_BYTES});
 
-/** The first message of a connection: which room, and who. */
-const handleHello = (ws, message) => {
+/**
+ * Forgets a room that nobody is in or on their way into (a refused hello
+ * must not keep a room in memory for good). A room with a project is kept a
+ * little while first, like a room everyone just left: otherwise every
+ * refused hello would read all of it from disk again. A room that is already
+ * waiting to be forgotten (see Room.closeSoon) is left to that.
+ */
+const forgetIfUnused = room => {
+    if (room.clients.size > 0 || room.pendingHellos > 0 || room.closeTimer || rooms.get(room.id) !== room) return;
+    if (room.snapshot) {
+        room.closeSoon();
+    } else {
+        room.close();
+    }
+};
+
+/**
+ * Puts someone in a room once every check has passed, or refuses them.
+ *
+ * Checking a room password takes a moment (scrypt runs on another thread),
+ * and anything can happen meanwhile: someone else creates the room, its
+ * password changes, it is forgotten, the connection closes... So after each
+ * wait, everything is looked at again from the start, and a check is only
+ * used for the password hash it was made against: nobody gets in without
+ * passing the check for the room's password as it is at that moment.
+ *
+ * @param {WebSocket} ws the connection
+ * @param {string} ip its address (for the per-address limits, see addressKey)
+ * @param {function(object)} onJoin called with the client just before it joins
+ * @param {object} hello what the hello asked for, already cleaned up
+ * @returns {Promise<?object>} the client, or null if refused
+ */
+const joinRoom = async (ws, ip, onJoin, hello) => {
+    const {roomId, password, resume} = hello;
+    const guards = passwordGuards(roomId, ip);
+    // Someone who left while waiting for their turn costs no scrypt work.
+    const wanted = () => ws.readyState === ws.OPEN;
+    // Work already done for this hello, used again while it still applies.
+    let newHash = null;
+    /** @type {Map<string, boolean>} room password hash -> whether the password matches it */
+    const checked = new Map();
+    let checks = 0;
+    // Set once their resume token turned out to be from before the room's
+    // password last changed, and from while it had a password (it is used
+    // up then, so remembered here): their editor may still send that one.
+    let oldPasswordMember = false;
+    for (;;) {
+        // (No wrong-tries check before this: only a room with a password has
+        // one, and that can only be seen once the room is read. A room that
+        // refuses someone stays in memory a while, see forgetIfUnused.)
+        const room = getRoom(roomId);
+        const turnAway = (code, text) => {
+            refuse(ws, code, text);
+            forgetIfUnused(room);
+            return null;
+        };
+        if (room.loadFailed) return turnAway('busy', 'This room can\'t be opened right now. Try again in a minute.');
+        // Their editor connected again, but their old connection is still here.
+        const previous = resume ? [...room.clients.values()].find(c => c.resumeToken === resume && !c.closing) : null;
+        if (room.clients.size - (previous ? 1 : 0) >= MAX_CLIENTS_PER_ROOM) return turnAway('room-full', 'This room is full');
+        // (Joining a room whose project is being sent anyway costs nothing extra.)
+        if (room.snapshot && !room.stateCache && tooMuchPending()) return turnAway('busy', BUSY_MESSAGE);
+        const brandNew = room.clients.size === 0 && !room.snapshot;
+        if (brandNew && MAX_ROOM_STORAGE_BYTES > 0 && store.usedBytes() > MAX_ROOM_STORAGE_BYTES) {
+            return turnAway('server-full', SERVER_FULL_MESSAGE);
+        }
+        const resumingCreator = !!room.creatorGrace && resume !== null && resume === room.creatorGrace.token;
+        // Their editor connected again after the old connection was noticed as broken.
+        const dropped = !previous && resume !== null ? room.droppedMember(resume) : null;
+        const droppedMember = dropped !== null && dropped.version === room.passwordVersion;
+        if (dropped !== null && !droppedMember) {
+            // They dropped out before the password was set, changed or
+            // removed: they never heard about it, and nobody in the room saw
+            // them while it happened, so their token is no pass. It is used
+            // up; they need the password like anyone else. But the old
+            // password their editor still sends isn't guessing, if the room
+            // had one when they dropped out (see the check below).
+            room.forgetDropped(resume);
+            oldPasswordMember = dropped.locked;
+        }
+
+        // The password. Cheap checks first; scrypt only when nothing else refuses them.
+        let work = null;
+        if (brandNew) {
+            // Their editor knows this room had a password, but the server has
+            // forgotten the room (restarted with an empty disk...). Only
+            // someone who has the password may create it again, or it would
+            // come back open to anyone. Not a guess: nothing is counted.
+            if (hello.expectLocked && !password) return turnAway('password-needed', PASSWORD_NEEDED_MESSAGE);
+            if (password && password.length < MIN_ROOM_PASSWORD_LENGTH) return turnAway('bad-password', PASSWORD_TOO_SHORT);
+            if (password && !newHash) {
+                if (!mayHashPassword(ip)) return turnAway('busy', TOO_MANY_HASHES_MESSAGE);
+                work = () => hashRoomPassword(ip, password, wanted);
+            }
+        } else if (room.passwordHash && !previous && !resumingCreator && !droppedMember) {
+            // (Someone reconnecting with the token from their welcome was let
+            // in already, so their place is kept even if the password changed.)
+            const hash = room.passwordHash;
+            if (!password) return turnAway('password-needed', PASSWORD_NEEDED_MESSAGE);
+            if (!checked.has(hash)) {
+                // (A room with too many wrong tries refuses everyone new, an
+                // outdated token too: that only says its own try isn't counted.)
+                if (tooManyTries(guards)) return turnAway('too-many-tries', TOO_MANY_TRIES_MESSAGE);
+                // The wrong-password limits this check counts against: none
+                // for the old password of someone who dropped out, while the
+                // room's password has uncounted checks left (see
+                // MAX_UNCOUNTED_CHECKS_PER_PASSWORD).
+                const countedGuards = oldPasswordMember && room.takeUncountedCheck() ? [] : guards;
+                if (password.length < MIN_ROOM_PASSWORD_LENGTH) {
+                    // Never right (room passwords are longer), but still a guess.
+                    for (const guard of countedGuards) guard.tries.hit(guard.key);
+                    checked.set(hash, false);
+                } else {
+                    work = () => checkRoomPassword(ip, countedGuards, password, hash, wanted).then(outcome => {
+                        if (outcome.turn === 'done' && outcome.result !== null) checked.set(hash, outcome.result);
+                        return outcome;
+                    });
+                }
+            }
+            if (!work && !checked.get(hash)) {
+                log(`[${room.id}] wrong password for this room`);
+                return turnAway('wrong-password', 'Wrong password for this room.');
+            }
+        }
+        // (An existing room without a password ignores any password sent.)
+
+        if (!work) {
+            if (brandNew) {
+                // A brand-new room: whoever creates it decides whether it is
+                // listed, its name and its password. For an existing room
+                // these fields are ignored.
+                room.listed = hello.listed;
+                room.title = hello.title;
+                if (password || room.passwordHash) room.setPasswordHash(password ? newHash : null);
+                if (password) log(`[${room.id}] created with a password`);
+            }
+            let wasProviding = resumingCreator;
+            if (previous) {
+                wasProviding = room.takeOver(previous);
+                log(`[${room.id}] ${previous.name} connected again`);
+            }
+            if (resume !== null) room.forgetDropped(resume);
+            const client = {
+                id: crypto.randomUUID(),
+                resumeToken: crypto.randomBytes(16).toString('hex'),
+                // For the limits on hashing new room passwords and on remembered tokens.
+                ip,
+                name: hello.name,
+                // Someone connecting again keeps their colour and their place in line.
+                color: previous ? previous.color : room.pickColor(hello.color),
+                ws,
+                room,
+                ready: false,
+                // Set once something they sent was refused: nothing more of theirs is used.
+                closing: false,
+                presence: {},
+                joinedAt: previous ? previous.joinedAt : Date.now(),
+                waitTimer: null,
+                uploadSeen: 0,
+                resyncTimer: null,
+                lastResyncAt: 0
+            };
+            log(`[${room.id}] ${client.name} joined (${room.clients.size + 1} here)`);
+            onJoin(client);
+            room.join(client, wasProviding);
+            return client;
+        }
+
+        if (checks > MAX_PASSWORD_RECHECKS) return turnAway('busy', BUSY_MESSAGE);
+        checks++;
+        room.pendingHellos++;
+        let outcome;
+        try {
+            outcome = await work();
+        } catch (e) {
+            log(`[${room.id}] could not check a room password:`, e && e.message);
+            outcome = {turn: 'failed', result: null};
+        } finally {
+            room.pendingHellos--;
+        }
+        if (!wanted()) {
+            // They left while waiting.
+            forgetIfUnused(room);
+            return null;
+        }
+        // 'blocked' (no wrong tries left by the time its turn came) is said
+        // by the next round, unless the room has no password any more.
+        if (outcome.turn !== 'done' && outcome.turn !== 'blocked') return turnAway('busy', BUSY_MESSAGE);
+        if (brandNew) newHash = outcome.result;
+        // ...and round again: the room may have changed meanwhile.
+    }
+};
+
+/**
+ * The first message of a connection: which room, and who. Only the few small
+ * things needed are taken from it, so a huge hello isn't kept in memory while
+ * a password is being checked.
+ * @param {WebSocket} ws the connection
+ * @param {object} message the hello
+ * @param {string} ip the connection's address
+ * @param {function(object)} onJoin called with the client just before it joins its room
+ * @returns {Promise<?object>} the client, or null if refused
+ */
+const handleHello = (ws, message, ip, onJoin) => {
     const roomId = sanitizeRoomId(message.room);
     if (!roomId) {
         refuse(ws, 'bad-room', 'Room codes can use letters, numbers, - and _');
-        return null;
+        return Promise.resolve(null);
     }
     if (message.protocol !== PROTOCOL_VERSION) {
         refuse(ws, 'protocol', 'Your editor and the server are different versions');
-        return null;
+        return Promise.resolve(null);
     }
-    const isOpen = rooms.has(roomId);
-    const room = getRoom(roomId);
-    const forgetIfUnused = () => {
-        if (!isOpen && room.clients.size === 0) room.close();
-    };
-    if (room.loadFailed) {
-        forgetIfUnused();
-        refuse(ws, 'busy', 'This room can\'t be opened right now. Try again in a minute.');
-        return null;
+    // Older editors send no password.
+    const password = typeof message.password === 'string' ? message.password : '';
+    if (password.length > MAX_ROOM_PASSWORD_LENGTH) {
+        refuse(ws, 'bad-password', PASSWORD_TOO_LONG);
+        return Promise.resolve(null);
     }
-    // Their editor connected again, but their old connection is still here.
-    const resume = typeof message.resume === 'string' && message.resume.length <= 64 ? message.resume : null;
-    const previous = resume ? [...room.clients.values()].find(c => c.resumeToken === resume && !c.closing) : null;
-    if (room.clients.size - (previous ? 1 : 0) >= MAX_CLIENTS_PER_ROOM) {
-        refuse(ws, 'room-full', 'This room is full');
-        return null;
-    }
-    // (Joining a room whose project is being sent anyway costs nothing extra.)
-    if (room.snapshot && !room.stateCache && tooMuchPending()) {
-        forgetIfUnused();
-        refuse(ws, 'busy', 'The server is busy right now. Try again in a minute.');
-        return null;
-    }
-    const brandNew = room.clients.size === 0 && !room.snapshot;
-    if (brandNew && MAX_ROOM_STORAGE_BYTES > 0 && store.usedBytes() > MAX_ROOM_STORAGE_BYTES) {
-        forgetIfUnused();
-        refuse(ws, 'server-full', SERVER_FULL_MESSAGE);
-        return null;
-    }
-    if (brandNew) {
-        // A brand-new room: whoever creates it decides whether it is
-        // listed. For an existing room these fields are ignored.
-        room.listed = message.listed === true;
-        room.title = sanitizeTitle(message.title);
-    }
-    let resumingCreator = !!room.creatorGrace && resume !== null && resume === room.creatorGrace.token;
-    if (previous) {
-        resumingCreator = room.takeOver(previous);
-        log(`[${room.id}] ${previous.name} connected again`);
-    }
-    const client = {
-        id: crypto.randomUUID(),
-        resumeToken: crypto.randomBytes(16).toString('hex'),
+    return joinRoom(ws, ip, onJoin, {
+        roomId,
+        password,
+        resume: typeof message.resume === 'string' && message.resume.length <= 64 ? message.resume : null,
         name: sanitizeName(message.name),
-        // Someone connecting again keeps their colour and their place in line.
-        color: previous ? previous.color : room.pickColor(message.color),
-        ws,
-        room,
-        ready: false,
-        // Set once something they sent was refused: nothing more of theirs is used.
-        closing: false,
-        presence: {},
-        joinedAt: previous ? previous.joinedAt : Date.now(),
-        waitTimer: null,
-        uploadSeen: 0,
-        resyncTimer: null,
-        lastResyncAt: 0
-    };
-    log(`[${room.id}] ${client.name} joined (${room.clients.size + 1} here)`);
-    room.join(client, resumingCreator);
-    return client;
+        color: sanitizeColor(message.color),
+        // Only used if this creates the room.
+        listed: message.listed === true,
+        title: sanitizeTitle(message.title),
+        // The editor saw that this room has a password (see joinRoom).
+        expectLocked: message.expectLocked === true
+    });
 };
 
 /** Every message after hello. */
@@ -986,7 +1779,7 @@ const handleMessage = (client, message, rawBytes) => {
         room.requestResync(client);
         break;
     case 'room-settings':
-        room.setListed(client, message.listed);
+        room.changeSettings(client, message);
         break;
     case 'ping':
         send(client.ws, {t: 'pong'});
@@ -1002,8 +1795,14 @@ wss.on('connection', (ws, req) => {
         refuse(ws, 'origin', 'This server does not accept connections from that website');
         return;
     }
+    // Only used for the per-address limits (an IPv6 address counts by its /64).
+    const ip = addressKey(clientIp(req));
     /** @type {null | object} */
     let client = null;
+    // Set when the hello arrives. While it is being checked (a room password
+    // takes a moment) and after it was refused, nothing else from this
+    // connection is used, not even another hello.
+    let helloReceived = false;
     ws.isAlive = true;
     ws.on('pong', () => {
         ws.isAlive = true;
@@ -1023,9 +1822,16 @@ wss.on('connection', (ws, req) => {
         if (!message || typeof message.t !== 'string') return;
         try {
             if (!client) {
-                if (message.t !== 'hello') return;
+                if (message.t !== 'hello' || helloReceived) return;
+                helloReceived = true;
                 clearTimeout(helloTimer);
-                client = handleHello(ws, message);
+                handleHello(ws, message, ip, joined => {
+                    // Set right as they join, so a close from then on takes them out again.
+                    client = joined;
+                }).catch(e => {
+                    log('error handling a hello, closing that connection:', e && e.message);
+                    ws.terminate();
+                });
                 return;
             }
             handleMessage(client, message, data.length);
@@ -1040,8 +1846,15 @@ wss.on('connection', (ws, req) => {
         clearTimeout(helloTimer);
         if (client) {
             log(`[${client.room.id}] ${client.name} left`);
-            // 1006: the connection broke (Wi-Fi, sleep...) rather than being closed.
-            client.room.leave(client, code === 1006);
+            // Dropped (they may come back with their token, see Room.leave):
+            // 1006, the connection broke (Wi-Fi, sleep, the heartbeat);
+            // CLOSE_RECONNECTING, their editor closed a connection it thought
+            // was dead and is connecting again; or the server closed it
+            // itself (refuseClient), after which the editor mostly reconnects.
+            // Any other close is Leave: the editor's Leave sends no code, and
+            // so does everything older editors close.
+            const dropped = code === 1006 || code === CLOSE_RECONNECTING || client.closing;
+            client.room.leave(client, dropped);
             client = null;
         }
     });
@@ -1050,6 +1863,7 @@ wss.on('connection', (ws, req) => {
 const heartbeat = setInterval(() => {
     for (const ws of wss.clients) {
         if (!ws.isAlive) {
+            // Closes with 1006, so it counts as a dropped connection (see Room.leave).
             ws.terminate();
             continue;
         }

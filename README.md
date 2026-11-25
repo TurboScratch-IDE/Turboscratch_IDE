@@ -56,8 +56,24 @@ the window to stop.
      "Show a new room in Open rooms" ticked (the default), everyone on the
      server sees it in their list and can join. Untick it to keep the room
      private.
+   - **Room name (optional):** the name people see in Open rooms. Without one,
+     the room shows your project's name.
+   - **Room password (optional):** a new room gets this password (at least 4
+     characters). Everyone who wants to join must type it first; only then
+     do they get the project. Rooms with a password show a 🔒 in Open rooms.
    - **Existing room:** your editor switches to the room's project, so save
-     your own work first.
+     your own work first. If the room has a password, type it in the password
+     box (or in the box that opens when you click **Join** in Open rooms).
+   - Inside a room, anyone in it can rename the room and set, change or remove
+     its password. People already in the room stay in it, and if their
+     connection drops they get back in without typing it (for 6 hours). After
+     a password change, tell everyone the new one: someone who clicks **Leave
+     room**, or comes back after the server restarted, needs it.
+   - If a room that had a password ever comes back without it (for example
+     the server lost its files and someone else made the room again), your
+     editor leaves it straight away, so your project stays private. The same
+     happens when you type a password but the room (or the server) has none:
+     empty the password box and join again if you want to join it anyway.
 4. For a room that isn't in Open rooms, click **Copy invite link** and send it
    to your friends. (When you open an invite link, the box starts unticked.)
    Anyone in a room can show it in Open rooms or hide it again with the
@@ -69,7 +85,8 @@ address (the launcher prints it, for example `http://192.168.1.20:8601/editor.ht
 not `localhost`. To work together over the internet, the collaboration server
 needs to run somewhere everyone can reach (a VPS or a hosting service with
 WebSocket support). Then enter its `wss://` address under **Server** in the
-Collaborate dialog.
+Collaborate dialog. **Use the default server** puts the website's own server
+back.
 
 ## Accounts, posting, friends and studios
 
@@ -126,6 +143,11 @@ are fine for most servers.
 | `CREATOR_GRACE_MS` | 15000 | If a room's creator loses their connection before their project arrives, how long they get to come back |
 | `FIRST_SNAPSHOT_TIMEOUT_MS` | 180000 | How long people wait for a new room's project before they're told it isn't coming (they keep waiting while it's still uploading) |
 | `MAX_OP_LOG_OPS`, `MAX_OP_LOG_MB` | 10000, 100 | How many edits a room can collect before its project must be saved again (normally that happens long before) |
+| `ROOM_PASSWORD_TRIES_PER_IP`, `ROOM_PASSWORD_TRIES_PER_ROOM` | 10, 30 | Wrong room passwords allowed every 10 minutes, per address and room, and per room from everyone |
+| `ROOM_PASSWORD_HASHES_PER_MINUTE` | 10 | New password rooms and password changes per address per minute |
+| `ROOM_PASSWORD_CHECKS_PER_ADDRESS` | 16 | Password checks one address can have running or waiting at once |
+| `DROPPED_MEMBER_KEEP_MS` | 21600000 (6 hours) | How long someone whose connection dropped can come back into a room with a password without typing it again |
+| `TRUSTED_PROXY_HOPS` | 0 (1 on Render) | How many proxies (like Caddy or a hosting service) sit in front of the server, so the password limits see people's real addresses |
 
 The server is built to be safe on the internet: one person can't crash it with
 a strange message, make it run out of memory or disk, or break other rooms.
@@ -140,7 +162,19 @@ your place and colour in the room.
   see their change.
 - Not synced: monitors (variable displays on the stage), which costume is
   selected, sprite layer order, the project title, turbo mode.
-- Anyone who knows a room code can join it. Only share codes with people you trust.
+- Without a password, anyone who knows a room code can join the room. Give rooms
+  a password, and only share it with people you trust. Invite links never
+  contain the password: tell your friends the password yourself.
+- Room passwords are stored only as a salted scrypt hash, and wrong guesses are
+  limited (10 per address and 30 for everyone per room, every 10 minutes). If
+  someone keeps guessing wrong, new people may have to wait a few minutes
+  before they can join; people already in the room aren't affected. Behind a
+  tunnel (like playit.gg) the server may see everyone as the same address, so
+  these limits then count for everyone together.
+- Someone still using an editor from before room passwords (an old page that
+  wasn't reloaded) who is in a room when it gets a password stays in, but
+  after their connection drops for good or the server restarts, their editor
+  keeps trying to reconnect. Reloading the page gets the new editor.
 - The "Sprite folders" addon is off by default because it renames and reorders
   things differently on each person's screen, which breaks syncing.
 - When something looks out of sync, click **Resync project** in the Collaborate

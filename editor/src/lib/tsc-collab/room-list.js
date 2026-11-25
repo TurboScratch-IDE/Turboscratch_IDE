@@ -24,6 +24,8 @@ const cleanRoom = raw => {
         room: raw.room,
         title: typeof raw.title === 'string' && raw.title ? raw.title.slice(0, 60) : null,
         people: Number.isInteger(raw.people) && raw.people > 0 ? raw.people : 0,
+        // The room has a password: joining it from the list asks for it first.
+        locked: raw.locked === true,
         names: Array.isArray(raw.names) ?
             raw.names.filter(name => typeof name === 'string').slice(0, 5)
                 .map(name => name.slice(0, 24)) :
@@ -36,7 +38,8 @@ class NoRoomList extends Error {}
 /**
  * @param {string} serverUrl the ws:// or wss:// server address
  * @param {AbortSignal} signal cancels the request
- * @returns {Promise<Array<{room: string, title: ?string, people: number, names: string[]}>>} the rooms
+ * @returns {Promise<Array<{room: string, title: ?string, people: number, locked: boolean, names: string[]}>>}
+ *     the rooms
  */
 const fetchRoomList = async (serverUrl, signal) => {
     const response = await fetch(`${serverHttpUrl(serverUrl)}/rooms`, {cache: 'no-store', signal});

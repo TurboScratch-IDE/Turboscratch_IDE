@@ -12,23 +12,29 @@ const session = getCollabSession();
 
 const TSCCollabModal = props => {
     const invite = readInviteFromUrl();
-    // In the room list, a new room is shown with the project's name.
-    const handleJoin = params => session.join(Object.assign({title: props.projectTitle}, params));
+    // A new room gets the name the person typed, or else the project's name
+    // (shown in the room list).
+    const handleJoin = params => session.join(Object.assign({}, params, {
+        title: params.title || props.projectTitle
+    }));
     return (
         <CollabModalComponent
             initialRoom={invite ? invite.room : null}
             initialServer={invite ? invite.serverUrl : null}
             projectChanged={props.projectChanged}
             projectReady={props.projectReady}
+            projectTitle={props.projectTitle}
             onClose={props.onClose}
             onJoin={handleJoin}
             onLeave={() => {
                 session.leave();
                 props.onClose();
             }}
+            onRename={title => session.renameRoom(title)}
             onResync={() => session.resync()}
             onSendChat={text => session.sendChat(text)}
             onSetListed={listed => session.setListed(listed)}
+            onSetPassword={password => session.setRoomPassword(password)}
             onChatRead={() => session.markChatRead()}
         />
     );

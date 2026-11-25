@@ -8,12 +8,26 @@ const initialState = {
     /** idle | connecting | syncing | connected | reconnecting | error */
     status: 'idle',
     error: null,
+    /**
+     * The server's code for the last error (like 'wrong-password'), so the
+     * join form can point at the box that needs fixing.
+     */
+    errorCode: null,
     room: null,
     serverUrl: null,
+    /** The room's name, or null when it has none (then the code is shown). */
+    title: null,
     /** Whether the room shows up in the room list ("Open rooms"). */
     listed: false,
     /** False on older servers that have no room list. */
     listSupported: false,
+    /**
+     * Whether the room has a password. The password itself is never kept
+     * here: this state is read by the whole interface.
+     */
+    locked: false,
+    /** False on older servers that have no room passwords or room names to change. */
+    lockSupported: false,
     /** @type {null|{id: string, name: string, color: string}} */
     me: null,
     /** @type {Array<{id: string, name: string, color: string, presence: {target?: string}}>} */

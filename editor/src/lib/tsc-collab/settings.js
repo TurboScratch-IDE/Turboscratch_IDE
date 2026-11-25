@@ -6,6 +6,8 @@
 
 const NAME_KEY = 'tsc:collab-name';
 const SERVER_KEY = 'tsc:collab-server';
+// The website's own default server at the moment the server above was saved.
+const SERVER_DEFAULT_KEY = 'tsc:collab-server-default';
 
 const safeGet = key => {
     try {
@@ -25,8 +27,6 @@ const safeSet = (key, value) => {
 
 const loadSavedName = () => safeGet(NAME_KEY) || '';
 const saveName = name => safeSet(NAME_KEY, name);
-const loadSavedServer = () => safeGet(SERVER_KEY) || '';
-const saveServer = server => safeSet(SERVER_KEY, server);
 
 const isLocalHostname = hostname => (
     hostname === 'localhost' ||
@@ -36,6 +36,17 @@ const isLocalHostname = hostname => (
 );
 
 /**
+ * The default server when the build doesn't name one: the server started
+ * next to the editor on your own computer (http), or none at all on an https
+ * website like GitHub Pages ('' means "ask").
+ */
+const pageDefaultServerUrl = () => {
+    if (location.protocol === 'https:') return '';
+    const host = location.hostname || 'localhost';
+    return `ws://${host}:8090`;
+};
+
+/**
  * Where to look for the collaboration server by default:
  *  - a hosted build can bake one in (TSC_COLLAB_SERVER when building);
  *  - when the editor runs from your own computer (http), the server started
@@ -43,11 +54,35 @@ const isLocalHostname = hostname => (
  *  - on an https website like GitHub Pages there's no server next to the
  *    page, so the person has to type one in ('' means "ask").
  */
-const defaultServerUrl = () => {
-    if (process.env.TSC_COLLAB_SERVER) return process.env.TSC_COLLAB_SERVER;
-    if (location.protocol === 'https:') return '';
-    const host = location.hostname || 'localhost';
-    return `ws://${host}:8090`;
+const defaultServerUrl = () => process.env.TSC_COLLAB_SERVER || pageDefaultServerUrl();
+
+/**
+ * Remembers the server someone joined, and which default server the website
+ * had then, so loadSavedServer can tell when the website got a new one.
+ * @param {string} server the server's address
+ */
+const saveServer = server => {
+    safeSet(SERVER_KEY, server);
+    safeSet(SERVER_DEFAULT_KEY, defaultServerUrl());
+};
+
+/**
+ * The server someone used last time, or null to use the default.
+ * Someone who once typed a server (maybe because the website had none) would
+ * otherwise never notice when the website gets a default server of its own:
+ * their old one would stay in the box. So when the website's default changed
+ * since the server was saved, the new default wins, once. A server they pick
+ * after that is kept again.
+ * @returns {?string} the saved server, or null when there's none or it's out of date
+ */
+const loadSavedServer = () => {
+    const saved = safeGet(SERVER_KEY);
+    if (!saved) return null;
+    let savedDefault = safeGet(SERVER_DEFAULT_KEY);
+    // Saved by an editor from before this was remembered: back then, the
+    // website's default was whatever the page itself gives ('' on https).
+    if (savedDefault === null) savedDefault = pageDefaultServerUrl();
+    return savedDefault === defaultServerUrl() ? saved : null;
 };
 
 /** A collaboration server's normal web address (ws://host:8090 → http://host:8090). */

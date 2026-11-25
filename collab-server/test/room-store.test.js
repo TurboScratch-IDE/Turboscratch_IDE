@@ -251,3 +251,159 @@ test('nesting check: exact limit, and quick for huge flat values', () => {
     assert.strictEqual(nestingTooDeep(wide, 100), true);
     assert.ok(Date.now() - started < 1000, `took ${Date.now() - started} ms`);
 });
+
+test('a room password hash is saved with the settings and loads back; rooms without one have none', () => {
+    const {store, file} = newStore();
+    const hash = `scrypt$16384$8$1$${'s'.repeat(24)}$${'k'.repeat(88)}`;
+    const locked = room('locked', 2, [op(3)], {passwordHash: hash});
+    locked.snapshotFile = store.saveSnapshot(locked);
+    assert.strictEqual(store.load('locked', 100).passwordHash, hash);
+    assert.strictEqual(JSON.parse(fs.readFileSync(file('locked.json'), 'utf8')).passwordHash, hash);
+
+    // Changed or removed later: only the settings file is written.
+    locked.passwordHash = null;
+    store.saveSettings(locked, locked.snapshotFile);
+    assert.strictEqual(store.load('locked', 100).passwordHash, null);
+    assert.strictEqual(JSON.parse(fs.readFileSync(file('locked.json'), 'utf8')).passwordHash, null);
+    locked.passwordHash = hash;
+    store.saveSettings(locked, locked.snapshotFile);
+    assert.strictEqual(store.load('locked', 100).passwordHash, hash);
+
+    // A room saved without the field, or by a version from before room passwords.
+    store.saveSnapshot(room('open', 0, []));
+    assert.strictEqual(store.load('open', 100).passwordHash, null);
+    fs.writeFileSync(file('open.json'), JSON.stringify({version: 2, snapshotFile: 'open.0.sb3', snapshotSeq: 0,
+        listed: false, title: 'Old room', createdAt: 1}));
+    assert.strictEqual(store.load('open', 100).passwordHash, null);
+});
+
+test('anything that is not a server-made password hash counts as no password', () => {
+    const {store, file} = newStore();
+    store.saveSnapshot(room('weird', 0, []));
+    const settings = JSON.parse(fs.readFileSync(file('weird.json'), 'utf8'));
+    for (const value of [42, true, {hash: 'scrypt$x'}, ['scrypt$x'], 'hunter22', '', 'SCRYPT$1$2$3$4$5',
+        `scrypt$${'x'.repeat(300)}`]) {
+        fs.writeFileSync(file('weird.json'), JSON.stringify({...settings, passwordHash: value}));
+        assert.strictEqual(store.load('weird', 100).passwordHash, null, JSON.stringify(value).slice(0, 40));
+    }
+    const longest = `scrypt$${'x'.repeat(293)}`;
+    fs.writeFileSync(file('weird.json'), JSON.stringify({...settings, passwordHash: longest}));
+    assert.strictEqual(store.load('weird', 100).passwordHash, longest);
+});
+
+const HASH = `scrypt$16384$8$1$${'s'.repeat(24)}$${'k'.repeat(88)}`;
+
+/** Runs `save` and returns the files it wrote, in order; `stopAt` acts like a crash just before that file. */
+const writeOrder = (save, stopAt = null) => {
+    const order = [];
+    const rename = fs.renameSync;
+    fs.renameSync = (from, to) => {
+        if (path.basename(to) === stopAt) throw new Error('the server stopped');
+        order.push(path.basename(to));
+        return rename(from, to);
+    };
+    try {
+        save();
+    } catch (e) {
+        if (e.message !== 'the server stopped') throw e;
+    } finally {
+        fs.renameSync = rename;
+    }
+    return order;
+};
+
+test('the settings are written before a new snapshot, so a locked room\'s project is never on disk without its password', () => {
+    const {store, file, dir} = newStore();
+    assert.deepStrictEqual(writeOrder(() => store.saveSnapshot(room('first', 0, [], {passwordHash: HASH}))),
+        ['first.json', 'first.0.sb3', 'first.ops']);
+    assert.deepStrictEqual(writeOrder(() => store.saveSnapshot(room('first', 3, [op(4)], {passwordHash: HASH}))),
+        ['first.json', 'first.3.sb3', 'first.ops']);
+
+    // Stopped right after the settings of a room's first snapshot: nothing to restore, as before.
+    assert.deepStrictEqual(writeOrder(() => store.saveSnapshot(room('crash1', 0, [], {passwordHash: HASH})), 'crash1.0.sb3'),
+        ['crash1.json']);
+    const empty = store.load('crash1', 100);
+    assert.strictEqual(empty.snapshot, null);
+    assert.strictEqual(empty.passwordHash, null);
+
+    // A password was just set, and the server stopped after the new settings
+    // (which name a snapshot that never made it to disk): the older snapshot
+    // and its edits are used, and the room keeps the new password.
+    store.saveSnapshot(room('crash2', 2, [op(3)]));
+    assert.deepStrictEqual(writeOrder(() => store.saveSnapshot(room('crash2', 5, [], {passwordHash: HASH})), 'crash2.5.sb3'),
+        ['crash2.json']);
+    assert.strictEqual(JSON.parse(fs.readFileSync(file('crash2.json'), 'utf8')).snapshotFile, 'crash2.5.sb3');
+    const loaded = store.load('crash2', 100);
+    assert.strictEqual(text(loaded.snapshot), 'at 2');
+    assert.strictEqual(loaded.snapshotSeq, 2);
+    assert.deepStrictEqual(loaded.ops.map(o => o.seq), [3]);
+    assert.strictEqual(loaded.passwordHash, HASH);
+    assert.strictEqual(loaded.snapshotHash, null, 'the fingerprint was for the snapshot that is missing');
+    assert.strictEqual(loaded.needsRewrite, true);
+    assert.ok(!fs.readdirSync(dir).some(name => name.startsWith('crash2') && name.includes('damaged')));
+
+    // A room saved by an older version keeps its settings (which hold its
+    // edits) until the new files are there.
+    fs.writeFileSync(file('old.sb3'), project('old project'));
+    fs.writeFileSync(file('old.json'), JSON.stringify({version: 1, snapshotSeq: 4, ops: [op(5)], listed: true}));
+    const old = store.load('old', 100);
+    assert.deepStrictEqual(writeOrder(() => store.saveSnapshot(Object.assign({id: 'old'}, old))),
+        ['old.4.sb3', 'old.ops', 'old.json']);
+});
+
+test('damaged settings keep the room\'s password when its hash can still be read', () => {
+    const {store, file, dir} = newStore();
+    store.saveSnapshot(room('salvage', 2, [op(3)], {passwordHash: HASH}));
+    const settings = fs.readFileSync(file('salvage.json'), 'utf8');
+    // The end of the file is lost: no longer JSON, but the hash is all there.
+    fs.writeFileSync(file('salvage.json'), settings.slice(0, -20));
+    const loaded = store.load('salvage', 100);
+    assert.strictEqual(loaded.passwordHash, HASH);
+    assert.strictEqual(text(loaded.snapshot), 'at 2');
+    assert.deepStrictEqual(loaded.ops.map(o => o.seq), [3]);
+    assert.strictEqual(loaded.needsRewrite, true);
+    assert.ok(fs.readdirSync(dir).some(name => name.startsWith('salvage.json.damaged-')));
+    // Written back with the next save.
+    store.saveSnapshot(Object.assign({id: 'salvage'}, loaded));
+    assert.strictEqual(JSON.parse(fs.readFileSync(file('salvage.json'), 'utf8')).passwordHash, HASH);
+
+    // Damaged somewhere else, with the hash still whole.
+    fs.writeFileSync(file('salvage.json'), `garbage${settings.slice(1)}`);
+    assert.strictEqual(store.load('salvage', 100).passwordHash, HASH);
+
+    // A damaged file that shows the room had no password.
+    store.saveSnapshot(room('open', 0, []));
+    const openSettings = fs.readFileSync(file('open.json'), 'utf8');
+    assert.ok(openSettings.startsWith('{"version":2,"passwordHash":null,'), openSettings);
+    fs.writeFileSync(file('open.json'), openSettings.slice(0, 40));
+    assert.strictEqual(store.load('open', 100).passwordHash, null);
+    assert.strictEqual(text(store.load('open', 100).snapshot), 'at 0');
+});
+
+test('settings cut off inside the password hash: the room is not opened, and the file is kept as it is', () => {
+    const {store, file, dir} = newStore();
+    store.saveSnapshot(room('cut', 2, [op(3)], {passwordHash: HASH}));
+    const settings = fs.readFileSync(file('cut.json'), 'utf8');
+    for (const length of [28, 40, 60, 150]) {
+        const damaged = settings.slice(0, length);
+        fs.writeFileSync(file('cut.json'), damaged);
+        assert.throws(() => store.load('cut', 100), /password hash can't be read; fix or remove cut\.json/, String(length));
+        assert.strictEqual(fs.readFileSync(file('cut.json'), 'utf8'), damaged);
+    }
+    assert.deepStrictEqual(fs.readdirSync(dir).sort(), ['cut.2.sb3', 'cut.json', 'cut.ops']);
+    // Without a project there's nothing to protect: the room is new.
+    fs.renameSync(file('cut.2.sb3'), file('elsewhere.bin'));
+    assert.strictEqual(store.load('cut', 100).snapshot, null);
+
+    // Settings too short to say anything, or missing (deleted by hand): the
+    // room opens with default settings, without a password, like rooms
+    // saved before room passwords existed.
+    store.saveSnapshot(room('short', 0, [], {passwordHash: HASH}));
+    fs.writeFileSync(file('short.json'), '{"version":2,"pass');
+    assert.strictEqual(store.load('short', 100).passwordHash, null);
+    store.saveSnapshot(room('gone', 0, [], {passwordHash: HASH}));
+    fs.renameSync(file('gone.json'), file('elsewhere.json'));
+    const gone = store.load('gone', 100);
+    assert.strictEqual(text(gone.snapshot), 'at 0');
+    assert.strictEqual(gone.passwordHash, null);
+});

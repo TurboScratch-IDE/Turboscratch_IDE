@@ -64,6 +64,22 @@
     box-shadow: 0 0 0 3px $looks-transparent;
 }
 
+/* A box that needs fixing (like a wrong room password). */
+.input-error,
+.input-error:focus {
+    border-color: $error-primary;
+    box-shadow: 0 0 0 3px $error-transparent;
+}
+
+/* A password box and its Show button. */
+.password-box {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
 .hint {
     font-size: 0.75rem;
     opacity: 0.7;
@@ -153,6 +169,35 @@
     cursor: pointer;
 }
 
+/* "Rename" next to the room's name. */
+.edit-link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: $text-primary;
+    opacity: 0.75;
+    font: inherit;
+    font-size: 0.8rem;
+    text-decoration: underline;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.edit-link:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+/* "Use the default server" under the server box: as wide as its words. */
+.use-default {
+    align-self: flex-start;
+}
+
+.small-button {
+    padding: 0.35rem 0.7rem;
+    font-size: 0.8rem;
+}
+
 .progress-box {
     display: flex;
     flex-direction: column;
@@ -188,11 +233,65 @@
     gap: 1rem;
 }
 
+.room-heading {
+    flex: 1;
+    min-width: 0;
+}
+
+.room-name-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.2rem 0.6rem;
+}
+
 .room-code {
     font-size: 1.3rem;
     font-weight: bold;
     font-family: ui-monospace, Menlo, Consolas, monospace;
     word-break: break-all;
+}
+
+.room-name {
+    font-size: 1.3rem;
+    font-weight: bold;
+    overflow-wrap: anywhere;
+}
+
+/* "Copy invite link", and under it what else friends need. */
+.invite {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.3rem;
+    max-width: 13rem;
+    text-align: right;
+}
+
+/* The room's password: what it is now, and the buttons to change it. */
+.setting-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.5rem 0.4rem 0.75rem;
+    border-radius: 0.6rem;
+    background: $ui-black-transparent;
+}
+
+.setting-text {
+    flex: 1;
+    min-width: 8rem;
+    font-weight: bold;
+}
+
+.setting-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    padding: 0.6rem 0.75rem;
+    border-radius: 0.6rem;
+    background: $ui-black-transparent;
 }
 
 .people {
@@ -311,11 +410,21 @@
 
 .room-item {
     display: flex;
-    align-items: center;
-    gap: 0.75rem;
+    flex-direction: column;
+    gap: 0.45rem;
     padding: 0.45rem 0.5rem 0.45rem 0.75rem;
     border-radius: 0.6rem;
     background: $ui-black-transparent;
+}
+
+.room-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.lock {
+    margin-right: 0.35rem;
 }
 
 .room-info {
