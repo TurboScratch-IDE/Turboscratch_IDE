@@ -21,9 +21,18 @@ const PackagerIntegrationHOC = function (WrappedComponent) {
             window.removeEventListener('message', this.handleMessage);
         }
         handleClickPackager () {
-            if (this.props.canOpenPackager) {
-                window.open(`${PACKAGER_URL}/?import_from=${location.origin}`);
+            if (!this.props.canOpenPackager) return;
+            if (location.protocol !== 'http:' && location.protocol !== 'https:') {
+                // The online packager only takes projects from websites: it
+                // ignores import_from=tsc-app://editor (the desktop app), so
+                // there it would just open empty. Say how to get the project in.
+                // eslint-disable-next-line no-alert
+                alert('The packager opens in a new window. Save your project first ' +
+                    '(File > Save to your computer), then load that .sb3 file in the packager.');
+                window.open(`${PACKAGER_URL}/`);
+                return;
             }
+            window.open(`${PACKAGER_URL}/?import_from=${location.origin}`);
         }
         handleMessage (e) {
             if (e.origin !== PACKAGER_ORIGIN) {

@@ -220,6 +220,31 @@ test('a refusal from the server is not retried', async () => {
     session.leave();
 });
 
+test('in the desktop app, a server that refuses the app says what to do', async () => {
+    const website = globalThis.location;
+    globalThis.location = {protocol: 'tsc-app:', hostname: 'editor', href: 'tsc-app://editor/editor.html'};
+    try {
+        const session = await join();
+        const socket = FakeWebSocket.created[0];
+        socket.opens();
+        // What servers from before the desktop app send it.
+        socket.receives({
+            t: 'error',
+            code: 'origin',
+            message: 'This server does not accept connections from that website'
+        });
+        socket.closes();
+
+        assert.equal(getState().status, 'error');
+        assert.equal(getState().errorCode, 'origin');
+        assert.match(getState().error, /doesn't let the desktop app in yet/);
+        assert.doesNotMatch(getState().error, /that website/);
+        session.leave();
+    } finally {
+        globalThis.location = website;
+    }
+});
+
 test('cancelling while waiting to retry stops trying', async () => {
     const session = await join();
     FakeWebSocket.created[0].closes();

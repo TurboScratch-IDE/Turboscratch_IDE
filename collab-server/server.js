@@ -103,6 +103,15 @@ const MAX_ROOM_STORAGE_BYTES = numberSetting('MAX_ROOM_STORAGE_MB', 2048) * 1024
 // e.g. ALLOWED_ORIGINS=https://turboscratch-ide.github.io,http://localhost:8601
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim())
     .filter(Boolean);
+// The TurboScratch desktop app shows the editor from its own tsc-app://editor
+// pages, so it is always let in, even when ALLOWED_ORIGINS is set. That is
+// safe: browsers set the Origin header from the page's real address, and no
+// website can have a tsc-app:// one. Programs that aren't browsers could send
+// any Origin anyway (also the website's), so the list never stopped them.
+// Room access is checked inside the messages (room code, password), not by
+// cookies, so a page that gets in here gains nothing else.
+// Never let 'null' in: sandboxed frames and data: pages on ANY website send that.
+const DESKTOP_APP_ORIGIN = 'tsc-app://editor';
 const MAX_NAME_LENGTH = 24;
 const MAX_CHAT_LENGTH = 500;
 const MAX_TITLE_LENGTH = 60;
@@ -1791,7 +1800,7 @@ wss.on('connection', (ws, req) => {
     // First of all: a broken frame from anyone must never crash the server.
     ws.on('error', () => {});
     const origin = req.headers.origin;
-    if (ALLOWED_ORIGINS.length > 0 && !ALLOWED_ORIGINS.includes(origin)) {
+    if (ALLOWED_ORIGINS.length > 0 && !ALLOWED_ORIGINS.includes(origin) && origin !== DESKTOP_APP_ORIGIN) {
         refuse(ws, 'origin', 'This server does not accept connections from that website');
         return;
     }
@@ -1908,4 +1917,4 @@ const start = async () => {
 };
 start();
 
-module.exports = {httpServer, wss, rooms};
+module.exports = {httpServer, wss, rooms, DESKTOP_APP_ORIGIN};

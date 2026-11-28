@@ -1,0 +1,102 @@
+{
+  "name": "turboscratch-ide-desktop",
+  "productName": "TurboScratch IDE",
+  "version": "1.0.0",
+  "private": true,
+  "description": "TurboScratch IDE as a desktop app for Windows and Mac",
+  "author": "TurboScratch IDE contributors",
+  "license": "GPL-3.0",
+  "homepage": "https://turboscratch-ide.github.io/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TurboScratch-IDE/Turboscratch_IDE.git",
+    "directory": "desktop"
+  },
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build-editor": "node scripts/build-editor.js",
+    "make-icons": "electron scripts/make-icons.js",
+    "dist": "electron-builder --publish never",
+    "dist:mac": "electron-builder --mac --publish never",
+    "dist:win": "electron-builder --win --publish never",
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "devDependencies": {
+    "electron": "45.5.0",
+    "electron-builder": "26.18.1"
+  },
+  "build": {
+    "appId": "io.github.turboscratch-ide.desktop",
+    "productName": "TurboScratch IDE",
+    "copyright": "Copyright © 2026 TurboScratch IDE contributors. Free software under GPL-3.0.",
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    },
+    "files": [
+      "package.json",
+      "src/**/*",
+      "editor/**/*",
+      {
+        "from": "..",
+        "to": ".",
+        "filter": [
+          "LICENSE"
+        ]
+      }
+    ],
+    "asar": true,
+    "npmRebuild": false,
+    "publish": null,
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.education",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "notarize": false,
+      "extendInfo": {
+        "NSCameraUsageDescription": "TurboScratch IDE uses the camera for the video sensing blocks.",
+        "NSMicrophoneUsageDescription": "TurboScratch IDE uses the microphone to record sounds and for the loudness block."
+      }
+    },
+    "dmg": {
+      "artifactName": "TurboScratch-IDE-mac-${arch}.${ext}"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "artifactName": "TurboScratch-IDE-windows-setup.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "TurboScratch IDE",
+      "deleteAppDataOnUninstall": false,
+      "license": "../LICENSE"
+    }
+  }
+}

@@ -3,6 +3,12 @@ node_modules/
 editor/build/
 editor/dist/
 
+# Desktop app: packages, the copied editor build (npm run build-editor) and
+# the installers (npm run dist). desktop/build/ holds the icons: keep it.
+desktop/node_modules/
+desktop/editor/
+desktop/dist/
+
 # Collaboration server room storage (your rooms' projects)
 collab-server/data/
 

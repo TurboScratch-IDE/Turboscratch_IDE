@@ -30,7 +30,106 @@ server. Because the website uses https, browsers only let it connect to a
   `TSC_COLLAB_SERVER` (Settings → Secrets and variables → Actions → Variables) to that
   `wss://` address so the website uses it by default. You can set
   `ALLOWED_ORIGINS=https://turboscratch-ide.github.io` on the server to only accept
-  connections from the website.
+  connections from the website (and the desktop app, which is always let in).
+
+## Desktop app (Windows and Mac)
+
+TurboScratch IDE is also an app for your computer. It's the same editor as the
+website, packed into an app with [Electron](https://www.electronjs.org/). The
+editor works without internet. Collaborate, Open rooms, accounts, Explore, the
+sprite and sound libraries and the extension gallery need internet: the app
+connects to the TurboScratch server (`wss://turboscratch-rooms.playit.plus`)
+by itself. There's no collaboration server inside the app.
+
+| Computer | Download |
+| --- | --- |
+| Windows 10 or 11 | [TurboScratch-IDE-windows-setup.exe](https://github.com/TurboScratch-IDE/Turboscratch_IDE/releases/latest/download/TurboScratch-IDE-windows-setup.exe) |
+| Mac with an Apple chip (M1 and newer) | [TurboScratch-IDE-mac-arm64.dmg](https://github.com/TurboScratch-IDE/Turboscratch_IDE/releases/latest/download/TurboScratch-IDE-mac-arm64.dmg) |
+| Mac with an Intel chip | [TurboScratch-IDE-mac-x64.dmg](https://github.com/TurboScratch-IDE/Turboscratch_IDE/releases/latest/download/TurboScratch-IDE-mac-x64.dmg) |
+
+Which Mac do you have? Apple menu → **About This Mac**: "Chip: Apple M…" is an
+Apple chip, "Processor: … Intel" is Intel. The Mac app needs macOS 13 or newer.
+All versions are on the [Releases](https://github.com/TurboScratch-IDE/Turboscratch_IDE/releases)
+page, and **Check for updates…** in the app's menu tells you when there's a new
+one. Projects, settings, the backpack and your sign-in are kept apart from the
+website's, so sign in again in the app.
+
+### Opening it the first time
+
+The app isn't signed with a paid certificate, so your computer warns you the
+first time. That's normal, and you only do this once.
+
+**Mac**
+
+1. Open the .dmg file and drag **TurboScratch IDE** into **Applications**.
+2. Double-click it in Applications. Your Mac says it can't open it: click
+   **Done** or **Cancel** (not **Move to Trash**).
+3. Then:
+   - **macOS 13 Ventura or 14 Sonoma:** right-click (or Control-click) the
+     app, choose **Open**, then click **Open** again.
+   - **macOS 15 Sequoia, 26 Tahoe or newer:** right-click → Open doesn't work
+     any more. Open **System Settings → Privacy & Security**, scroll down to
+     **Security** and click **Open Anyway** next to TurboScratch IDE (the
+     button is there for about an hour after step 2). When your Mac asks
+     again, click **Open Anyway** and type your Mac's password.
+4. Only as a last resort, if the Mac says the app is "damaged": open
+   **Terminal**, run `xattr -cr "/Applications/TurboScratch IDE.app"` and open
+   the app again.
+
+**Windows**
+
+1. Double-click **TurboScratch-IDE-windows-setup.exe**.
+2. If you see "Windows protected your PC" (SmartScreen), click **More info**,
+   then **Run anyway**.
+3. Follow the steps in the installer.
+
+On Windows 11, **Smart App Control** may block the app, and it has no button
+to allow just one app. Then use the editor on the website instead.
+
+### Build it yourself
+
+You need Node.js 22 or newer.
+
+```sh
+cd desktop
+npm ci
+npm run build-editor   # builds the editor for the app into desktop/editor/ (a few minutes)
+npm start              # opens the app
+npm run dist:mac       # makes both Mac .dmg files in desktop/dist/ (on a Mac)
+npm run dist:win       # makes the Windows installer in desktop/dist/ (best on Windows)
+```
+
+Run `npm run build-editor` again after you change the editor. It bakes the
+server in; to use another one, set it first, e.g.
+`TSC_COLLAB_SERVER=wss://my-server.example.com npm run build-editor`.
+
+### Making a release
+
+1. In `desktop/`, run `npm version 1.0.1 --no-git-tag-version` (it changes the
+   version in `package.json` and `package-lock.json`). Commit and push it.
+2. Push a tag with the same version: `git tag v1.0.1`, then
+   `git push origin v1.0.1`.
+3. GitHub Actions (`.github/workflows/desktop.yml`) builds the editor, the two
+   Mac .dmg files and the Windows installer, and makes a release for the tag
+   with them (about 20 minutes). The download links above then get the new
+   version. You can edit the release text on GitHub afterwards to say what's
+   new.
+
+- If the tag and the version don't match, the workflow stops straight away.
+- A tag with a dash, like `v1.1.0-beta.1`, makes a pre-release: the download
+  links stay on the last normal release, so you can test it first.
+- **Actions → Desktop app → Run workflow** only builds the installers (download
+  them from the run's page). It doesn't make a release.
+
+### Servers and the app
+
+The app's pages have their own address, `tsc-app://editor`. An up-to-date
+collaboration server always lets the app in, even when `ALLOWED_ORIGINS` is
+set. An older server with `ALLOWED_ORIGINS` set refuses it when you join a
+room ("This server doesn't let the desktop app in yet"). Until it's updated,
+add the app to the list there:
+`ALLOWED_ORIGINS=https://turboscratch-ide.github.io,tsc-app://editor`.
+Accounts and Open rooms work either way.
 
 ## Start it on your computer
 
@@ -136,7 +235,7 @@ are fine for most servers.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `ALLOWED_ORIGINS` | (any) | Websites allowed to connect, e.g. `https://turboscratch-ide.github.io` |
+| `ALLOWED_ORIGINS` | (any) | Websites allowed to connect, e.g. `https://turboscratch-ide.github.io` (the desktop app, `tsc-app://editor`, is always allowed) |
 | `ROOM_EXPIRE_DAYS` | 90 | Rooms nobody opened for this many days are deleted (0 = keep forever) |
 | `MAX_ROOM_STORAGE_MB` | 2048 | No new rooms are created while room files use more than this; existing rooms keep working (0 = no limit) |
 | `MAX_PENDING_SEND_MB` | 256 | When this much data is waiting to be sent, people joining big rooms are asked to try again in a moment (0 = no limit) |
@@ -203,6 +302,9 @@ longer has her, so a server doesn't need an AI key. Her server side is still in
 | `collab-server/ai/` | The old AI helper's server side (the editor doesn't use it; off without a key) |
 | `editor/src/lib/themes/accent/turbo.js` | The TurboScratch color theme (default) |
 | `collab-server/` | The collaboration server (`npm start`, tests with `npm test`) |
+| `desktop/` | The desktop app for Windows and Mac (Electron): `npm start`, installers with `npm run dist:mac` / `npm run dist:win`, tests with `npm test` |
+| `desktop/src/` | The app itself: its windows, the `tsc-app://editor` pages, which links open where, the menu |
+| `desktop/editor/`, `desktop/dist/` | The editor copy the app shows (`npm run build-editor`) and the finished installers. Both are made by the build and aren't kept in git |
 | `branding/` | Logo and app icons |
 
 ## Updating from TurboWarp
@@ -217,5 +319,7 @@ TurboScratch IDE is based on [TurboWarp](https://turbowarp.org/) by Thomas Weber
 and contributors, which is based on [Scratch](https://scratch.mit.edu/) by the
 Scratch Foundation and MIT. TurboWarp's changes are licensed under GPL-3.0, so
 TurboScratch IDE is GPL-3.0 too: if you share it, share the source code as well.
+The desktop app is GPL-3.0 as well, and each release links to its own source
+code (the release's tag).
 Scratch is a project of the Scratch Foundation; TurboScratch IDE is not affiliated
 with or endorsed by the Scratch Foundation or TurboWarp.

@@ -1,0 +1,348 @@
+# Builds the TurboScratch IDE desktop app: the Mac .dmg files (Apple chip and
+# Intel) and the Windows installer.
+#
+# - Push a tag like v1.0.0 (it must match "version" in desktop/package.json):
+#   the installers are built and a GitHub Release is made for that tag with
+#   them. A tag with a dash, like v1.1.0-beta.1, makes a pre-release, so the
+#   "latest" download links keep pointing to the last normal release.
+# - Run it by hand (Actions > Desktop app > Run workflow): only builds the
+#   installers, so you can download and test them from the run's page. No
+#   release is made.
+#
+# The installers aren't signed with a paid certificate, so the release notes
+# explain how to open them the first time.
+name: Desktop app
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# Only the release job may write (it makes the release); everything else reads.
+permissions:
+  contents: read
+
+# Never cancel a release halfway: a second run for the same tag waits instead.
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    # The same shell (with "stop on the first error") on Linux, Mac and Windows
+    shell: bash
+
+jobs:
+  editor:
+    name: Build the editor for the app
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # The server the app uses for collaboration and accounts. The app's pages
+      # have no normal web address, so without this it would have no server
+      # by default and accounts would be switched off.
+      TSC_COLLAB_SERVER: ${{ vars.TSC_COLLAB_SERVER || 'wss://turboscratch-rooms.playit.plus' }}
+      # Invite links made in the app open the website's editor, because friends
+      # can't open the app's own tsc-app:// pages.
+      TSC_WEBSITE_URL: https://turboscratch-ide.github.io/Turboscratch_IDE/editor.html
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: editor/package-lock.json
+
+      # Checked first, so a wrong tag stops the run before the long builds.
+      - name: Check the tag matches the app version
+        if: github.event_name == 'push'
+        run: |
+          version="v$(node -p "require('./desktop/package.json').version")"
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::The tag is $GITHUB_REF_NAME but desktop/package.json says $version. Make them the same, then push the tag again."
+            exit 1
+          fi
+          echo "Building TurboScratch IDE $version"
+
+      - name: Install editor packages
+        working-directory: editor
+        run: npm ci --no-audit --no-fund
+
+      - name: Build editor
+        working-directory: editor
+        env:
+          NODE_ENV: production
+          # No ROOT on purpose: the app needs relative addresses, because its
+          # pages live at tsc-app://editor/ and not under /Turboscratch_IDE/
+          # like the website's.
+          # Hash routing, because the default router only works on http(s).
+          ROUTING_STYLE: hash
+        run: npm run build
+
+      # A broken build would still make installers that look fine, so check
+      # the things that are easy to get wrong.
+      - name: Check the editor build
+        run: |
+          if [ ! -f editor/build/editor.html ]; then
+            echo "::error::The editor build has no editor.html."
+            exit 1
+          fi
+          if grep -Eq '(src|href)="/' editor/build/editor.html; then
+            echo "::error::editor.html uses absolute paths (was ROOT set?). The app needs relative ones."
+            exit 1
+          fi
+          if ! grep -rqF "$TSC_COLLAB_SERVER" editor/build/js; then
+            echo "::error::The collaboration server ($TSC_COLLAB_SERVER) isn't in the editor build."
+            exit 1
+          fi
+          if ! grep -rqF "$TSC_WEBSITE_URL" editor/build/js; then
+            echo "::error::The website address for invite links ($TSC_WEBSITE_URL) isn't in the editor build."
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: editor-build
+          path: editor/build
+          if-no-files-found: error
+          # Only the next jobs of this run need it
+          retention-days: 3
+
+  mac:
+    name: Mac installers (.dmg)
+    needs: editor
+    # An Apple chip Mac; it builds the Intel .dmg too (the app has no native code)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: editor-build
+          path: desktop/editor
+
+      - name: Install app packages
+        working-directory: desktop
+        run: npm ci --no-audit --no-fund
+
+      - name: App tests
+        working-directory: desktop
+        run: npm test
+
+      # Builds TurboScratch-IDE-mac-x64.dmg and TurboScratch-IDE-mac-arm64.dmg.
+      # The script already says --publish never, so this never uploads
+      # anything itself; the release job does that.
+      - name: Build the .dmg files
+        working-directory: desktop
+        env:
+          # Don't go looking for a paid Apple certificate (there is none).
+          # The app is ad-hoc signed instead (mac.identity '-' in
+          # package.json): Apple chip Macs refuse to run unsigned apps at all.
+          # Note: electron-builder skips ALL signing in pull_request runs, so
+          # don't make releases from that trigger.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run dist:mac
+
+      # Without a real ad-hoc signature, Macs call the app "damaged" and won't
+      # open it, so a release must never go out without one.
+      - name: Check the .dmg files and the signatures
+        working-directory: desktop/dist
+        run: |
+          ls -la
+          for file in TurboScratch-IDE-mac-x64.dmg TurboScratch-IDE-mac-arm64.dmg; do
+            if [ ! -f "$file" ]; then
+              echo "::error::$file is missing. Check the dmg artifactName in desktop/package.json."
+              exit 1
+            fi
+          done
+          count=0
+          while IFS= read -r app; do
+            count=$((count + 1))
+            echo "Checking $app"
+            codesign --verify --deep --strict "$app"
+            info="$(codesign -dv "$app" 2>&1)"
+            echo "$info"
+            # "Sealed Resources=none" would mean only the bare linker signature
+            if ! grep -q '^Signature=adhoc' <<<"$info" || ! grep -q '^Sealed Resources version=' <<<"$info"; then
+              echo "::error::$app isn't ad-hoc signed. Check mac.identity in desktop/package.json."
+              exit 1
+            fi
+          done < <(find . -maxdepth 2 -type d -name '*.app')
+          if [ "$count" -ne 2 ]; then
+            echo "::error::Expected 2 apps (Intel and Apple chip), found $count."
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-mac
+          path: |
+            desktop/dist/TurboScratch-IDE-mac-x64.dmg
+            desktop/dist/TurboScratch-IDE-mac-arm64.dmg
+          if-no-files-found: error
+          retention-days: 14
+          # .dmg files are already compressed
+          compression-level: 0
+
+  windows:
+    name: Windows installer (.exe)
+    needs: editor
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: editor-build
+          path: desktop/editor
+
+      - name: Install app packages
+        working-directory: desktop
+        run: npm ci --no-audit --no-fund
+
+      # Again on Windows, where file paths work differently
+      - name: App tests
+        working-directory: desktop
+        run: npm test
+
+      # Builds TurboScratch-IDE-windows-setup.exe (NSIS, x64). The script
+      # already says --publish never.
+      - name: Build the installer
+        working-directory: desktop
+        env:
+          # There is no code signing certificate, so don't look for one
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run dist:win
+
+      - name: Check the installer
+        working-directory: desktop/dist
+        run: |
+          ls -la
+          if [ ! -f TurboScratch-IDE-windows-setup.exe ]; then
+            echo "::error::TurboScratch-IDE-windows-setup.exe is missing. Check the nsis artifactName in desktop/package.json."
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-windows
+          path: desktop/dist/TurboScratch-IDE-windows-setup.exe
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  release:
+    name: Make the GitHub Release
+    needs: [mac, windows]
+    # Only for a pushed tag. A run started by hand only builds (even when it
+    # is started on a tag).
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          path: installers
+          merge-multiple: true
+
+      - name: Check the installers
+        run: |
+          ls -la installers
+          for file in TurboScratch-IDE-mac-arm64.dmg TurboScratch-IDE-mac-x64.dmg TurboScratch-IDE-windows-setup.exe; do
+            if [ ! -f "installers/$file" ]; then
+              echo "::error::installers/$file is missing."
+              exit 1
+            fi
+          done
+
+      # Plain words: many people who download this are kids who read English
+      # as a second language. Edit the release on GitHub afterwards to add
+      # what's new.
+      - name: Write the release notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          cat > notes.md <<'EOF'
+          TurboScratch IDE as an app for your computer. It's the same editor as the website, and it works without internet. Collaborate, accounts, Explore, the sprite and sound libraries and the extension gallery need internet.
+
+          ## Which file do I need?
+
+          | Computer | File |
+          | --- | --- |
+          | Windows 10 or 11 | **TurboScratch-IDE-windows-setup.exe** |
+          | Mac with an Apple chip (M1, M2, M3 and newer) | **TurboScratch-IDE-mac-arm64.dmg** |
+          | Mac with an Intel chip | **TurboScratch-IDE-mac-x64.dmg** |
+
+          Not sure which Mac you have? Click the Apple menu → **About This Mac**. "Chip: Apple M…" means an Apple chip, "Processor: … Intel" means Intel. The Mac app needs macOS 13 Ventura or newer.
+
+          ## Opening it the first time
+
+          The app isn't signed with a paid certificate, so your computer warns you the first time. That's normal. You only have to do this once.
+
+          ### Mac
+
+          1. Open the .dmg file and drag **TurboScratch IDE** into **Applications**.
+          2. Double-click TurboScratch IDE in Applications. Your Mac says it can't open it. Click **Done** or **Cancel** (not **Move to Trash**).
+          3. Then:
+             - **macOS 13 Ventura or 14 Sonoma:** right-click (or Control-click) the app, choose **Open**, then click **Open** again.
+             - **macOS 15 Sequoia or newer:** open **System Settings → Privacy & Security**, scroll down to **Security** and click **Open Anyway** next to TurboScratch IDE (this button is there for about an hour after step 2). When your Mac asks again, click **Open Anyway** and type your Mac's password.
+
+          Only if the Mac still says the app is "damaged": open the **Terminal** app, type `xattr -cr "/Applications/TurboScratch IDE.app"`, press Enter and open the app again.
+
+          ### Windows
+
+          1. Double-click **TurboScratch-IDE-windows-setup.exe**.
+          2. If you see "Windows protected your PC", click **More info**, then **Run anyway**.
+          3. Follow the steps in the installer.
+
+          On Windows 11, **Smart App Control** may block the app, and it has no button to allow just one app. Use the editor on the website instead: https://turboscratch-ide.github.io/Turboscratch_IDE/editor.html
+
+          ## Source code
+
+          TurboScratch IDE is free software under the GPL-3.0 license.
+          EOF
+          echo "The source code of this version is the tag $TAG (the **Source code** files below)." >> notes.md
+          cat notes.md
+
+      - name: Make the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          files=(
+            installers/TurboScratch-IDE-mac-arm64.dmg
+            installers/TurboScratch-IDE-mac-x64.dmg
+            installers/TurboScratch-IDE-windows-setup.exe
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # The release is already there (this job ran before, or someone
+            # made it by hand): only replace the installers, keep its text.
+            gh release upload "$TAG" "${files[@]}" --clobber
+          else
+            extra=()
+            # v1.1.0-beta.1 and similar: a pre-release, so "latest" stays put
+            case "$TAG" in
+              *-*) extra+=(--prerelease) ;;
+            esac
+            gh release create "$TAG" "${files[@]}" --verify-tag \
+              --title "TurboScratch IDE ${TAG#v}" --notes-file notes.md "${extra[@]}"
+          fi

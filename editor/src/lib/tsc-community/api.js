@@ -6,6 +6,7 @@
  */
 
 import {arrayBufferToBase64} from '../tw-base64-utils';
+import {isDesktopApp} from '../tsc-collab/settings';
 
 const TOKEN_KEY = 'tsc:account-token';
 
@@ -34,8 +35,9 @@ const setToken = token => safeSet(TOKEN_KEY, token);
  *
  * For safety this never comes from an invite link or a server someone typed
  * for collaboration (that would let a crafted link collect passwords and
- * sign-ins). It's either the server built into this website, or, for the
- * editor started on your own computer, the server running next to it.
+ * sign-ins). It's either the server built into this website (or desktop
+ * app), or, for the editor started on your own computer, the server running
+ * next to it.
  */
 const getApiBase = () => {
     let base = null;
@@ -44,8 +46,10 @@ const getApiBase = () => {
     } else if (location.protocol === 'http:' && location.hostname) {
         base = `http://${location.hostname}:8090`;
     }
-    // Never send passwords or sign-ins unencrypted from a secure page.
-    if (base && location.protocol === 'https:' && !/^https:\/\//i.test(base)) return null;
+    // Never send passwords or sign-ins unencrypted from a secure page: the
+    // https website, or the desktop app, which is a secure page too.
+    const securePage = location.protocol === 'https:' || isDesktopApp();
+    if (base && securePage && !/^https:\/\//i.test(base)) return null;
     return base;
 };
 

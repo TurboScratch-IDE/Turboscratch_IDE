@@ -11,6 +11,7 @@ import {
     loadSavedServer,
     makeRoomCode,
     makeInviteLink,
+    isDesktopApp,
     isLocalHostname
 } from '../../lib/tsc-collab/settings';
 import {isServerUrl, useRoomList} from '../../lib/tsc-collab/room-list';
@@ -786,6 +787,10 @@ PasswordForm.propTypes = {
 
 const RoomView = ({state, onLeave, onResync, onSendChat, onSetListed, onRename, onSetPassword}) => {
     const [copied, setCopied] = useState(false);
+    // Set when copying the invite link didn't work: the link is then shown
+    // in a box, ready to copy by hand.
+    const [showLink, setShowLink] = useState(false);
+    const linkBoxRef = useRef(null);
     // What's being changed right now: null, 'name' or 'password'.
     const [editing, setEditing] = useState(null);
     const live = state.status === 'connected';
@@ -844,17 +849,27 @@ const RoomView = ({state, onLeave, onResync, onSendChat, onSetListed, onRename, 
     const invite = makeInviteLink(state.room, state.serverUrl);
     const handleCopy = () => {
         const done = () => {
+            setShowLink(false);
             setCopied(true);
             setTimeout(() => setCopied(false), 1500);
         };
-        if (navigator.clipboard) {
-            // eslint-disable-next-line no-alert
-            navigator.clipboard.writeText(invite).then(done, () => window.prompt('Copy this link:', invite));
-        } else {
-            // eslint-disable-next-line no-alert
-            window.prompt('Copy this link:', invite);
+        // Copying can be blocked, or missing on older browsers. A prompt()
+        // box can't help then: the desktop app has no real one. So the link
+        // is shown in the dialog instead.
+        const showBox = () => setShowLink(true);
+        try {
+            navigator.clipboard.writeText(invite).then(done, showBox);
+        } catch (e) {
+            showBox();
         }
     };
+    // Select the shown link, so copying it is just one key press.
+    useEffect(() => {
+        if (showLink && linkBoxRef.current) {
+            linkBoxRef.current.focus();
+            linkBoxRef.current.select();
+        }
+    }, [showLink]);
     const everyone = (state.me ? [Object.assign({mine: true}, state.me)] : []).concat(state.peers);
     return (
         <div
@@ -898,6 +913,20 @@ const RoomView = ({state, onLeave, onResync, onSendChat, onSetListed, onRename, 
                     )}
                 </div>
             </div>
+            {showLink && (
+                <label className={styles.field}>
+                    <span className={styles.label}>{'Invite link'}</span>
+                    <input
+                        className={styles.input}
+                        ref={linkBoxRef}
+                        value={invite}
+                        readOnly
+                        spellCheck={false}
+                        onFocus={e => e.target.select()}
+                    />
+                    <span className={styles.hint}>{'Copying didn\'t work. Copy the link from this box instead.'}</span>
+                </label>
+            )}
             {canChange && editing === 'name' && (
                 <RenameForm
                     initial={state.title || ''}
@@ -970,6 +999,13 @@ const RoomView = ({state, onLeave, onResync, onSendChat, onSetListed, onRename, 
                 <p className={styles.hint}>
                     {'Tip: friends on other computers can\'t open "localhost". Open this editor with your '}
                     {'computer\'s network address (like http://192.168.1.20:8601) to invite them.'}
+                </p>
+            )}
+            {/* Invite links from the desktop app open the https website (see makeInviteLink). */}
+            {isDesktopApp() && !/^wss:\/\//i.test(state.serverUrl || '') && (
+                <p className={styles.hint}>
+                    {'Tip: invite links open the TurboScratch website, and it can only join rooms on '}
+                    {'secure wss:// servers.'}
                 </p>
             )}
             <div className={styles.label}>{`People here (${everyone.length})`}</div>

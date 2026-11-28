@@ -8,6 +8,11 @@ const NAME_KEY = 'tsc:collab-name';
 const SERVER_KEY = 'tsc:collab-server';
 // The website's own default server at the moment the server above was saved.
 const SERVER_DEFAULT_KEY = 'tsc:collab-server-default';
+// The desktop app shows the editor from its own address, tsc-app://editor.
+const DESKTOP_APP_PROTOCOL = 'tsc-app:';
+// The website's editor page. Invite links made in the desktop app open it,
+// unless the app was built with another one (TSC_WEBSITE_URL).
+const DEFAULT_WEBSITE_URL = 'https://turboscratch-ide.github.io/Turboscratch_IDE/editor.html';
 
 const safeGet = key => {
     try {
@@ -35,13 +40,17 @@ const isLocalHostname = hostname => (
     hostname === ''
 );
 
+/** True when the editor runs inside the TurboScratch desktop app. */
+const isDesktopApp = () => location.protocol === DESKTOP_APP_PROTOCOL;
+
 /**
  * The default server when the build doesn't name one: the server started
  * next to the editor on your own computer (http), or none at all on an https
- * website like GitHub Pages ('' means "ask").
+ * website like GitHub Pages ('' means "ask"). The desktop app gets none too:
+ * its address (tsc-app://editor) isn't a computer a server could run on.
  */
 const pageDefaultServerUrl = () => {
-    if (location.protocol === 'https:') return '';
+    if (location.protocol === 'https:' || isDesktopApp()) return '';
     const host = location.hostname || 'localhost';
     return `ws://${host}:8090`;
 };
@@ -51,8 +60,9 @@ const pageDefaultServerUrl = () => {
  *  - a hosted build can bake one in (TSC_COLLAB_SERVER when building);
  *  - when the editor runs from your own computer (http), the server started
  *    next to it on port 8090;
- *  - on an https website like GitHub Pages there's no server next to the
- *    page, so the person has to type one in ('' means "ask").
+ *  - on an https website like GitHub Pages, or in a desktop app built
+ *    without one, there's no server next to the page, so the person has to
+ *    type one in ('' means "ask").
  */
 const defaultServerUrl = () => process.env.TSC_COLLAB_SERVER || pageDefaultServerUrl();
 
@@ -99,8 +109,24 @@ const makeRoomCode = () => {
     return `${pick(WORDS_A)}-${pick(WORDS_B)}-${number}`;
 };
 
+/**
+ * The page an invite link opens: this page, or inside the desktop app the
+ * website's editor, because friends can't open the app's own tsc-app://
+ * address (and may not have the app at all).
+ */
+const inviteLinkBase = () => {
+    if (!isDesktopApp()) return new URL(location.href);
+    try {
+        const url = new URL(process.env.TSC_WEBSITE_URL || DEFAULT_WEBSITE_URL);
+        if (url.protocol === 'https:' || url.protocol === 'http:') return url;
+    } catch (e) {
+        // A broken address in the build: use the normal website instead.
+    }
+    return new URL(DEFAULT_WEBSITE_URL);
+};
+
 const makeInviteLink = (room, serverUrl) => {
-    const url = new URL(location.href);
+    const url = inviteLinkBase();
     url.hash = '';
     url.searchParams.set('room', room);
     // Always include the server so friends end up on the same one, whatever
@@ -135,6 +161,7 @@ export {
     loadSavedServer,
     saveServer,
     isLocalHostname,
+    isDesktopApp,
     defaultServerUrl,
     serverHttpUrl,
     makeRoomCode,

@@ -199,6 +199,24 @@ test('with ALLOWED_ORIGINS, broken frames from a refused website do not crash th
     allowed.close();
 });
 
+test('with ALLOWED_ORIGINS, the desktop app is always let in, and look-alikes are not', async () => {
+    const server = await startServer({ALLOWED_ORIGINS: 'https://turboscratch-ide.github.io'});
+    const app = new Client(server, 'desktop-room', 'Desktop', {}, 'tsc-app://editor');
+    await app.next('welcome');
+    // 'null' is what sandboxed frames on any website send; undefined sends no Origin at all.
+    for (const origin of ['null', 'tsc-app://other', 'https://evil.example', 'tsc-app://editor.evil.example',
+        'tsc-app://editor/', undefined]) {
+        const refused = new Client(server, 'desktop-room', 'Sneaky', {}, origin);
+        const error = await refused.next('error');
+        assert.strictEqual(error.code, 'origin', `origin ${origin}`);
+        await refused.closed;
+        assert.strictEqual(refused.count('welcome'), 0, `origin ${origin}`);
+    }
+    // Nobody refused ever showed up in the room.
+    assert.strictEqual(app.count('peer-join'), 0);
+    app.close();
+});
+
 test('repeated resync requests are answered at most every few seconds', async () => {
     const server = await startServer();
     const owner = await openRoom(server, 'resync-room', 'Owner', 'x'.repeat(100000));

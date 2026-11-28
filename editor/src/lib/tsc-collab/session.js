@@ -19,7 +19,7 @@ import log from '../log';
 import {base64ToArrayBuffer, arrayBufferToBase64} from '../tw-base64-utils';
 import VMSync from './vm-sync';
 import {getState, setState, resetState, pushToast} from './store';
-import {saveName, saveServer, serverHttpUrl} from './settings';
+import {isDesktopApp, saveName, saveServer, serverHttpUrl} from './settings';
 
 const PROTOCOL_VERSION = 1;
 const PRESENCE_THROTTLE_MS = 250;
@@ -66,6 +66,10 @@ const NO_PASSWORDS_ON_SERVER_MESSAGE = 'This server doesn\'t support room passwo
 // Joined by choice after one of those, but the room asked for our project.
 const NO_PROJECT_MESSAGE = 'This room has no project and no password. It may not be your friends\' room, ' +
     'so your project wasn\'t shared.';
+// Servers from before the desktop app existed refuse it like an unknown
+// website, and their message talks about "that website".
+const DESKTOP_APP_REFUSED_MESSAGE = 'This server doesn\'t let the desktop app in yet. Its owner needs to update ' +
+    'it. Until then, use the TurboScratch website to join.';
 
 /**
  * Asks the server's normal web address for /health first. A sleeping free
@@ -687,10 +691,9 @@ class CollabSession {
             }
             // Errors that reconnecting can't fix end the session with a message.
             if (!this.everWelcomed || FATAL_ERRORS.includes(message.code)) {
-                this.fail(
-                    message.message || 'The server refused the connection.',
-                    typeof message.code === 'string' ? message.code : null
-                );
+                let text = message.message || 'The server refused the connection.';
+                if (message.code === 'origin' && isDesktopApp()) text = DESKTOP_APP_REFUSED_MESSAGE;
+                this.fail(text, typeof message.code === 'string' ? message.code : null);
             } else {
                 log.warn('[collab] server error', message);
                 // Shown when the connection closes (most errors close it).

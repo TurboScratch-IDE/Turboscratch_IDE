@@ -186,7 +186,10 @@ module.exports = [
                 'process.env.ROUTING_STYLE': JSON.stringify(process.env.ROUTING_STYLE || 'filehash'),
                 'process.env.ENABLE_WINDCHIMES': JSON.stringify(process.env.ENABLE_WINDCHIMES || ''),
                 // TurboScratch: default collaboration server for hosted builds (e.g. wss://example.com)
-                'process.env.TSC_COLLAB_SERVER': JSON.stringify(process.env.TSC_COLLAB_SERVER || '')
+                'process.env.TSC_COLLAB_SERVER': JSON.stringify(process.env.TSC_COLLAB_SERVER || ''),
+                // TurboScratch: the website's editor page, used for invite links made in the desktop
+                // app (its own tsc-app:// address can't be opened by friends)
+                'process.env.TSC_WEBSITE_URL': JSON.stringify(process.env.TSC_WEBSITE_URL || '')
             }),
             new HtmlWebpackPlugin({
                 chunks: ['editor'],
